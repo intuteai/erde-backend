@@ -1,0 +1,26 @@
+const express = require('express');
+const router = express.Router();
+const authenticateToken = require('../middleware/auth');
+const LvBattery = require('../models/lvBattery');
+const redis = require('../config/redis');
+
+router.get('/:vehicle_type', authenticateToken, async (req, res) => {
+  try {
+    const { vehicle_type } = req.params;
+    const cacheKey = `lv_battery_${vehicle_type.toLowerCase()}`;
+
+    const cached = await redis.get(cacheKey);
+    if (cached && req.query.force_refresh !== 'true') {
+      return res.json(JSON.parse(cached));
+    }
+
+    const data = await LvBattery.getByVehicleType(vehicle_type.toLowerCase());
+    await redis.setEx(cacheKey, 300, JSON.stringify(data));
+
+    res.json({ vehicle_type, data });
+  } catch {
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+module.exports = router;
