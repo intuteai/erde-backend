@@ -1,21 +1,31 @@
 const express = require('express');
 const router = express.Router();
-const User = require('../models/user');
+const User = require('../models/User');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 router.post('/login', async (req, res) => {
-  const { username, password } = req.body;
+  const { email, password } = req.body;
 
-  if (!username || !password)
-    return res.status(400).json({ error: 'Username and password are required' });
+  console.log('Route hit with body:', req.body); // Debug log
+
+  if (!email || !password) {
+    console.log('Missing credentials:', { email, password }); // Debug log
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
 
   try {
-    const user = await User.findByUsername(username);
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+    console.log('Attempting login for email:', email); // Debug log
+    const user = await User.findByEmail(email);
+    if (!user) {
+      console.log('User not found for email:', email); // Debug log
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
 
+    console.log('User found:', user); // Debug log
     const isValid = await bcrypt.compare(password, user.password_hash);
+    console.log('Password match result:', isValid); // Debug log
     if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
 
     const token = jwt.sign(
@@ -28,8 +38,14 @@ router.post('/login', async (req, res) => {
       { expiresIn: '6h' }
     );
 
-    res.json({ token });
+    console.log('Login successful, token generated:', token); // Debug log
+    res.json({
+      role: user.role,
+      name: user.username,
+      token,
+    });
   } catch (err) {
+    console.error('Login error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
