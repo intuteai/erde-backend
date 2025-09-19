@@ -15,6 +15,7 @@ const motorRoutes = require('./routes/motor');
 const faultsRoutes = require('./routes/faults');
 const vehicleRoutes = require('./routes/vehicle');
 const vehicleHistoricalRoutes = require('./routes/vehicleHistorical');
+const configRoutes = require('./routes/config');
 
 const app = express();
 const PORT = process.env.SERVER_PORT || 5000;
@@ -30,6 +31,7 @@ app.use('/api/battery', batteryRoutes);
 app.use('/api/motor', motorRoutes);
 app.use('/api/faults', faultsRoutes);
 app.use('/api/vehicle-historical', vehicleHistoricalRoutes);
+app.use('/api/config', configRoutes);
 
 // Start HTTP server
 const server = app.listen(PORT, () => {
@@ -46,6 +48,7 @@ wss.on('connection', (ws, req) => {
   const deviceId = params.get('device_id') || 'VCL001';
 
   if (!token) {
+    logger.error(`WebSocket connection failed: Missing token for ${deviceId}`);
     ws.close(4001, 'Authentication token missing');
     return;
   }
@@ -57,7 +60,7 @@ wss.on('connection', (ws, req) => {
     ws.deviceId = deviceId;
     logger.info(`🟢 WebSocket auth success: ${ws.user.username} for ${deviceId}`);
   } catch (err) {
-    logger.error('🔴 WebSocket token invalid:', err.message);
+    logger.error(`🔴 WebSocket token invalid for ${deviceId}: ${err.message}`);
     ws.close(4002, 'Invalid or expired token');
     return;
   }
@@ -70,6 +73,7 @@ wss.on('connection', (ws, req) => {
       config = getConfig(deviceId);
       if (config) {
         await redisClient.setEx(key, 3600, JSON.stringify(config));
+        logger.info(`Cached config for ${deviceId}`);
       } else {
         logger.error(`No config available for deviceId ${deviceId}`);
         return null;
@@ -82,7 +86,7 @@ wss.on('connection', (ws, req) => {
 
   // AWS WebSocket Setup
   let awsWs = awsWsPool.get(deviceId);
-  if (!awsWs || awsWs.readyState === WebSocket.CLOSED) {
+  if (!awsWs || awsWs.readyState === WebSocket.CLOSED || awsWs.readyState === WebSocket.CLOSING) {
     awsWs = new WebSocket(`${process.env.AWS_WS_URL}?device_id=${deviceId}`, {
       headers: {
         'Authorization': `Bearer ${process.env.AWS_API_KEY || ''}`,
@@ -91,13 +95,15 @@ wss.on('connection', (ws, req) => {
     awsWsPool.set(deviceId, awsWs);
 
     awsWs.on('open', () => {
-      awsWs.send(JSON.stringify({ action: 'subscribe', device_id: deviceId }));
-      logger.info(`AWS WS subscribed for ${deviceId}`);
+      const subscriptionMessage = JSON.stringify({ action: 'subscribe', device_id: deviceId });
+      awsWs.send(subscriptionMessage);
+      logger.info(`AWS WS subscribed for ${deviceId}: ${subscriptionMessage}`);
     });
 
     awsWs.on('message', async (awsMessage) => {
       try {
         const raw = JSON.parse(awsMessage.toString());
+        logger.info(`AWS WS message received for ${deviceId}: ${JSON.stringify(raw)}`);
         const config = await getConfigAsync();
         if (!config) {
           logger.error(`Cannot process WebSocket message: No config for ${deviceId}`);
@@ -105,31 +111,37 @@ wss.on('connection', (ws, req) => {
         }
         const payload = raw.payload || (raw.items && raw.items[0]?.payload) || raw;
         const parsed = parseCanData(payload, config);
+        // Select latest data if arrays
+        const latestData = {
+          battery: Array.isArray(parsed.battery)
+            ? parsed.battery.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0] || {}
+            : parsed.battery || {},
+          motor: Array.isArray(parsed.motor)
+            ? parsed.motor.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0] || {}
+            : parsed.motor || {},
+          faults: Array.isArray(parsed.faults)
+            ? parsed.faults.sort((a, b) => (b.faultTimestamp || 0) - (a.faultTimestamp || 0))[0] || {}
+            : parsed.faults || {},
+          timestamp: parsed.timestamp || Date.now(),
+        };
+        logger.info(`Sending parsed data to clients for ${deviceId}: ${JSON.stringify(latestData)}`);
         await redisClient.delPattern(`getData:${deviceId}:*`);
         wss.clients.forEach((client) => {
           if (client.readyState === WebSocket.OPEN && client.deviceId === deviceId) {
-            client.send(JSON.stringify({
-              battery: parsed.battery,
-              motor: parsed.motor,
-              faults: parsed.faults,
-              timestamp: parsed.timestamp,
-            }));
+            client.send(JSON.stringify(latestData));
           }
         });
       } catch (err) {
-        logger.error(`WS parse error for ${deviceId}:`, err.message);
+        logger.error(`WS parse error for ${deviceId}: ${err.message}`);
       }
     });
 
     awsWs.on('close', () => {
       logger.info(`AWS WS closed for ${deviceId}`);
       awsWsPool.delete(deviceId);
-      setTimeout(() => {
-        if (wss.clients.size > 0) connectWebSocket(deviceId);
-      }, 5000);
     });
 
-    awsWs.on('error', (err) => logger.error(`AWS WS error for ${deviceId}:`, err.message));
+    awsWs.on('error', (err) => logger.error(`AWS WS error for ${deviceId}: ${err.message}`));
   }
 
   ws.on('message', (message) => {
@@ -137,15 +149,33 @@ wss.on('connection', (ws, req) => {
     if (awsWs.readyState === WebSocket.OPEN) awsWs.send(message);
   });
 
-  ws.on('close', () => logger.info(`🔌 WebSocket closed for ${ws.user.username} (${deviceId})`));
+  ws.on('close', () => {
+    logger.info(`🔌 WebSocket closed for ${ws.user.username} (${deviceId})`);
+    // Only reconnect if there are still clients for this deviceId
+    const hasClients = Array.from(wss.clients).some(client => client.deviceId === deviceId && client.readyState === WebSocket.OPEN);
+    if (!hasClients) {
+      if (awsWs && awsWs.readyState === WebSocket.OPEN) {
+        awsWs.close();
+        awsWsPool.delete(deviceId);
+        logger.info(`Closed AWS WS for ${deviceId} due to no active clients`);
+      }
+    }
+  });
 
-  ws.on('error', (err) => logger.error(`Client WS error for ${deviceId}:`, err.message));
+  ws.on('error', (err) => logger.error(`Client WS error for ${deviceId}: ${err.message}`));
 });
 
 // Reconnect function
 function connectWebSocket(deviceId) {
+  // Only reconnect if there are active clients for this deviceId
+  const hasClients = Array.from(wss.clients).some(client => client.deviceId === deviceId && client.readyState === WebSocket.OPEN);
+  if (!hasClients) {
+    logger.info(`No active clients for ${deviceId}, skipping WebSocket reconnect`);
+    return;
+  }
+
   let awsWs = awsWsPool.get(deviceId);
-  if (!awsWs || awsWs.readyState === WebSocket.CLOSED) {
+  if (!awsWs || awsWs.readyState === WebSocket.CLOSED || awsWs.readyState === WebSocket.CLOSING) {
     awsWs = new WebSocket(`${process.env.AWS_WS_URL}?device_id=${deviceId}`, {
       headers: {
         'Authorization': `Bearer ${process.env.AWS_API_KEY || ''}`,
@@ -154,13 +184,15 @@ function connectWebSocket(deviceId) {
     awsWsPool.set(deviceId, awsWs);
 
     awsWs.on('open', () => {
-      awsWs.send(JSON.stringify({ action: 'subscribe', device_id: deviceId }));
-      logger.info(`AWS WS re-subscribed for ${deviceId}`);
+      const subscriptionMessage = JSON.stringify({ action: 'subscribe', device_id: deviceId });
+      awsWs.send(subscriptionMessage);
+      logger.info(`AWS WS re-subscribed for ${deviceId}: ${subscriptionMessage}`);
     });
 
     awsWs.on('message', async (awsMessage) => {
       try {
         const raw = JSON.parse(awsMessage.toString());
+        logger.info(`AWS WS message received for ${deviceId}: ${JSON.stringify(raw)}`);
         const config = await getConfigAsync();
         if (!config) {
           logger.error(`Cannot process WebSocket message: No config for ${deviceId}`);
@@ -168,35 +200,42 @@ function connectWebSocket(deviceId) {
         }
         const payload = raw.payload || (raw.items && raw.items[0]?.payload) || raw;
         const parsed = parseCanData(payload, config);
+        // Select latest data if arrays
+        const latestData = {
+          battery: Array.isArray(parsed.battery)
+            ? parsed.battery.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0] || {}
+            : parsed.battery || {},
+          motor: Array.isArray(parsed.motor)
+            ? parsed.motor.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0] || {}
+            : parsed.motor || {},
+          faults: Array.isArray(parsed.faults)
+            ? parsed.faults.sort((a, b) => (b.faultTimestamp || 0) - (a.faultTimestamp || 0))[0] || {}
+            : parsed.faults || {},
+          timestamp: parsed.timestamp || Date.now(),
+        };
+        logger.info(`Sending parsed data to clients for ${deviceId}: ${JSON.stringify(latestData)}`);
         await redisClient.delPattern(`getData:${deviceId}:*`);
         wss.clients.forEach((client) => {
           if (client.readyState === WebSocket.OPEN && client.deviceId === deviceId) {
-            client.send(JSON.stringify({
-              battery: parsed.battery,
-              motor: parsed.motor,
-              faults: parsed.faults,
-              timestamp: parsed.timestamp,
-            }));
+            client.send(JSON.stringify(latestData));
           }
         });
       } catch (err) {
-        logger.error(`WS parse error for ${deviceId}:`, err.message);
+        logger.error(`WS parse error for ${deviceId}: ${err.message}`);
       }
     });
 
     awsWs.on('close', () => {
       logger.info(`AWS WS closed for ${deviceId}`);
       awsWsPool.delete(deviceId);
-      setTimeout(() => {
-        if (wss.clients.size > 0) connectWebSocket(deviceId);
-      }, 5000);
+      setTimeout(() => connectWebSocket(deviceId), 5000);
     });
 
-    awsWs.on('error', (err) => logger.error(`AWS WS error for ${deviceId}:`, err.message));
+    awsWs.on('error', (err) => logger.error(`AWS WS error for ${deviceId}: ${err.message}`));
   }
 }
 
-// Graceful Shutdown (Register once)
+// Graceful Shutdown
 let isSigtermRegistered = false;
 if (!isSigtermRegistered) {
   process.on('SIGTERM', () => {
