@@ -2,51 +2,51 @@
   "deviceId": "VCL001",
   "canMappings": {
     "battery": {
-      "soc": "x201",
-      "stackVoltage": "x201",
-      "batteryStatus": "x202",
-      "maxVoltage": "x203",
-      "minVoltage": "x203",
-      "avgVoltage": "x203",
-      "maxTemp": "x204",
-      "minTemp": "x204",
-      "avgTemp": "x204",
-      "current": "x262",
-      "chargerCurrentDemand": "x263",
-      "chargerVoltageDemand": "x264",
+      "soc": "message201",
+      "stackVoltage": "message201",
+      "batteryStatus": "message202",
+      "maxVoltage": "message203",
+      "minVoltage": "message203",
+      "avgVoltage": "message203",
+      "maxTemp": "message204",
+      "minTemp": "message204",
+      "avgTemp": "message204",
+      "current": "message262",
+      "chargerCurrentDemand": "message263",
+      "chargerVoltageDemand": "message264",
       "moduleTemps": {
-        "module1": ["x205", "x206", "x207"],
-        "module2": ["x207", "x209"],
-        "module3": ["x209", "x211"],
-        "module4": ["x211", "x213"],
-        "module5": ["x214", "x216"]
+        "module1": ["message205", "message206", "message207"],
+        "module2": ["message207", "message209"],
+        "module3": ["message209", "message211"],
+        "module4": ["message211", "message213"],
+        "module5": ["message214", "message216"]
       },
       "cellVoltages": {
-        "module1": ["x217", "x218", "x219", "x220", "x221", "x222", "x223", "x224", "x225"],
-        "module2": ["x226", "x227", "x228", "x229", "x230", "x231", "x232", "x233", "x234"],
-        "module3": ["x235", "x236", "x237", "x238", "x239", "x240", "x241", "x242", "x243"],
-        "module4": ["x244", "x245", "x246", "x247", "x248", "x249", "x250", "x251", "x252"],
-        "module5": ["x253", "x254", "x255", "x256", "x257", "x258", "x259", "x260", "x261"]
+        "module1": ["message217", "message218", "message219", "message220", "message221", "message222", "message223", "message224", "message225"],
+        "module2": ["message226", "message227", "message228", "message229", "message230", "message231", "message232", "message233", "message234"],
+        "module3": ["message235", "message236", "message237", "message238", "message239", "message240", "message241", "message242", "message243"],
+        "module4": ["message244", "message245", "message246", "message247", "message248", "message249", "message250", "message251", "message252"],
+        "module5": ["message253", "message254", "message255", "message256", "message257", "message258", "message259", "message260", "message261"]
       }
     },
     "motor": {
-      "torqueLimit": "x411",
-      "torqueValue": "x411",
-      "motorSpeed": "x411",
-      "rotationDirection": "x411",
-      "operationMode": "x411",
-      "mcuEnable": "x411",
-      "mcuDrivePermit": "x411",
-      "mcuOffPermit": "x411",
-      "totalFaultStatus": "x413",
-      "acCurrent": "x412",
-      "acVoltage": "x412",
-      "dcVoltage": "x412",
-      "motorTemp": "x412",
-      "mcuTemp": "x412"
+      "torqueLimit": "message411",
+      "torqueValue": "message411",
+      "motorSpeed": "message411",
+      "rotationDirection": "message411",
+      "operationMode": "message411",
+      "mcuEnable": "message411",
+      "mcuDrivePermit": "message411",
+      "mcuOffPermit": "message411",
+      "totalFaultStatus": "message413",
+      "acCurrent": "message412",
+      "acVoltage": "message412",
+      "dcVoltage": "message412",
+      "motorTemp": "message412",
+      "mcuTemp": "message412"
     },
     "faults": {
-      "baseId": "x413",
+      "baseId": "message413",
       "keys": [
         "hardwareDriverFailure", "hardwareOvercurrentFault", "zeroOffsetFault", "fanFailure",
         "temperatureDifferenceFailure", "acHallFailure", "stallFailure", "lowVoltageUndervoltageFault",
@@ -57,10 +57,10 @@
       ]
     },
     "metadata": {
-      "radiatorTemp": "x413",
-      "motorQuantity": "x413",
-      "motorNum": "x413",
-      "mcuManufacturer": "x413"
+      "radiatorTemp": "message413",
+      "motorQuantity": "message413",
+      "motorNum": "message413",
+      "mcuManufacturer": "message413"
     }
   }
 }
