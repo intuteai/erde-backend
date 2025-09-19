@@ -30,7 +30,11 @@ router.get('/', authenticate, async (req, res) => {
   try {
     const data = await db.query('motor', { device_id: deviceId });
     logger.info(`Fetched motor data for device ${deviceId}`);
-    res.json(data);
+    // Return latest entry if array
+    const latestData = Array.isArray(data)
+      ? data.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0] || {}
+      : data;
+    res.json(latestData);
   } catch (err) {
     logger.error(`Error fetching motor data for ${deviceId}:`, err.message);
     res.status(500).json({ error: 'Internal server error' });
