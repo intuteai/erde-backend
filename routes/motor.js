@@ -1,43 +1,30 @@
+// routes/motor.js
 const express = require('express');
-const jwt = require('jsonwebtoken');
-const db = require('../config/db');
+const db = require('../config/postgres');
+const authenticateToken = require('../middleware/auth');
+const checkPermission = require('../middleware/checkPermission');
 const logger = require('../utils/logger');
 
 const router = express.Router();
 
-// Middleware to verify JWT
-const authenticate = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    logger.error('Motor route: Missing or invalid authorization header');
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+// GET /api/motor/analytics/:id
+router.get('/analytics/:id', authenticateToken, checkPermission('analytics', 'read'), async (req, res) => {
+  const { id } = req.params;
+  const days = parseInt(req.query.days) || 30;
 
-  const token = authHeader.split(' ')[1];
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    next();
+    const result = await db.query(
+      `SELECT day, max_op_power_kw, max_op_torque_nm, max_motor_temp_c
+       FROM motor_analytics_daily
+       WHERE vehicle_master_id = $1
+         AND day >= CURRENT_DATE - INTERVAL '${days} days'
+       ORDER BY day DESC`,
+      [id]
+    );
+    res.json(result.rows);
   } catch (err) {
-    logger.error('Motor route: Invalid token:', err.message);
-    res.status(401).json({ error: 'Invalid or expired token' });
-  }
-};
-
-// Get motor data
-router.get('/', authenticate, async (req, res) => {
-  const deviceId = req.query.device_id || 'VCL001';
-  try {
-    const data = await db.query('motor', { device_id: deviceId });
-    logger.info(`Fetched motor data for device ${deviceId}`);
-    // Return latest entry if array
-    const latestData = Array.isArray(data)
-      ? data.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0] || {}
-      : data;
-    res.json(latestData);
-  } catch (err) {
-    logger.error(`Error fetching motor data for ${deviceId}:`, err.message);
-    res.status(500).json({ error: 'Internal server error' });
+    logger.error(`GET /motor/analytics/${id} error: ${err.message}`);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

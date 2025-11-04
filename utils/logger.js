@@ -1,7 +1,7 @@
+// utils/logger.js
 const fs = require('fs');
 const path = require('path');
 
-// Ensure logs directory exists
 const logsDir = path.join(__dirname, '../../logs');
 const logFile = path.join(logsDir, 'app.log');
 
@@ -16,12 +16,12 @@ const log = (level, message, ...args) => {
   try {
     fs.appendFileSync(logFile, logMessage, 'utf8');
   } catch (err) {
-    console.error(`Failed to write to log file ${logFile}:`, err.message);
+    console.error(`Failed to write log: ${err.message}`);
   }
 };
 
 module.exports = {
-  info: (message, ...args) => log('info', message, ...args),
-  error: (message, ...args) => log('error', message, ...args),
-  warn: (message, ...args) => log('warn', message, ...args),
+  info: (msg, ...args) => log('info', msg, ...args),
+  error: (msg, ...args) => log('error', msg, ...args),
+  warn: (msg, ...args) => log('warn', msg, ...args),
 };
