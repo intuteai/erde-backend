@@ -1,251 +1,211 @@
+// server.js
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const WebSocket = require('ws');
 const jwt = require('jsonwebtoken');
-const { getConfig } = require('./config/config');
-const { parseCanData } = require('./services/canParser');
-const redisClient = require('./config/redis');
+const db = require('./config/postgres');
+const { parseCanDataWithDB } = require('./services/dbParser');
 const logger = require('./utils/logger');
 
-// Routes
+// === ROUTES ===
 const authRoutes = require('./routes/auth');
+const vehicleRoutes = require('./routes/vehicle');
 const batteryRoutes = require('./routes/battery');
 const motorRoutes = require('./routes/motor');
 const faultsRoutes = require('./routes/faults');
-const vehicleRoutes = require('./routes/vehicle');
-const vehicleHistoricalRoutes = require('./routes/vehicleHistorical');
 const configRoutes = require('./routes/config');
+const vehicleTypeRoutes = require('./routes/vehicleType');
+const vcuHmiRoutes = require('./routes/vcuHmi');
+const customerRoutes = require('./routes/customer');
+const vehicleMasterRoutes = require('./routes/vehicleMaster');
 
 const app = express();
 const PORT = process.env.SERVER_PORT || 5000;
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+// === DYNAMIC CORS — SUPPORTS VITE (5173), CRA (3000), etc. ===
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173',
+  // Add production later: 'https://yourdomain.com'
+];
 
-// API Routes
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow non-browser clients (Postman, mobile, etc.)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      logger.warn(`CORS blocked origin: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// === API ROUTES ===
 app.use('/api/auth', authRoutes);
 app.use('/api/vehicles', vehicleRoutes);
 app.use('/api/battery', batteryRoutes);
 app.use('/api/motor', motorRoutes);
 app.use('/api/faults', faultsRoutes);
-app.use('/api/vehicle-historical', vehicleHistoricalRoutes);
 app.use('/api/config', configRoutes);
+app.use('/api/vehicle-types', vehicleTypeRoutes);
+app.use('/api/vcu-hmi', vcuHmiRoutes);
+app.use('/api/customers', customerRoutes);
+app.use('/api/vehicles-master', vehicleMasterRoutes);
 
-// Start HTTP server
-const server = app.listen(PORT, () => {
-  logger.info(`✅ EV Dashboard Backend running on port ${PORT} at ${new Date().toString()}`);
+// === HEALTH CHECK ===
+app.get('/health', async (req, res) => {
+  try {
+    await db.query('SELECT 1');
+    res.json({ status: 'OK', db: 'connected', timestamp: new Date().toISOString() });
+  } catch {
+    res.status(500).json({ status: 'ERROR', db: 'disconnected' });
+  }
 });
 
-// WebSocket Server
+// === START HTTP SERVER ===
+const server = app.listen(PORT, () => {
+  logger.info(`EV Dashboard Backend LIVE on http://localhost:${PORT}`);
+});
+
+// === WEBSOCKET SERVER — REAL CAN INGRESS (NO AWS) ===
 const wss = new WebSocket.Server({ server });
-const awsWsPool = new Map();
 
-wss.on('connection', (ws, req) => {
-  const params = new URLSearchParams(req.url.split('?')[1] || '');
-  const token = params.get('token');
-  const deviceId = params.get('device_id') || 'VCL001';
-
-  if (!token) {
-    logger.error(`WebSocket connection failed: Missing token for ${deviceId}`);
-    ws.close(4001, 'Authentication token missing');
-    return;
-  }
-
-  let decoded;
+// Map device_unique_id → vehicle_master_id
+const getVehicleMasterId = async (deviceId) => {
   try {
-    decoded = jwt.verify(token, process.env.JWT_SECRET);
-    ws.user = decoded;
-    ws.deviceId = deviceId;
-    logger.info(`🟢 WebSocket auth success: ${ws.user.username} for ${deviceId}`);
+    const res = await db.query(
+      'SELECT vehicle_master_id FROM vehicle_master WHERE vehicle_unique_id = $1',
+      [deviceId]
+    );
+    return res.rows[0]?.vehicle_master_id || null;
   } catch (err) {
-    logger.error(`🔴 WebSocket token invalid for ${deviceId}: ${err.message}`);
-    ws.close(4002, 'Invalid or expired token');
+    logger.error(`DB error in getVehicleMasterId: ${err.message}`);
+    return null;
+  }
+};
+
+wss.on('connection', async (ws, req) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const token = url.searchParams.get('token');
+  const deviceId = url.searchParams.get('device_id');
+
+  // === VALIDATE ===
+  if (!token || !deviceId) {
+    ws.close(4001, 'Token and device_id required');
     return;
   }
 
-  // Get config (cached)
-  const getConfigAsync = async () => {
-    const key = `config:${deviceId.toLowerCase()}`;
-    let config = await redisClient.get(key);
-    if (!config) {
-      config = getConfig(deviceId);
-      if (config) {
-        await redisClient.setEx(key, 3600, JSON.stringify(config));
-        logger.info(`Cached config for ${deviceId}`);
-      } else {
-        logger.error(`No config available for deviceId ${deviceId}`);
-        return null;
-      }
-    } else {
-      config = JSON.parse(config);
-    }
-    return config;
-  };
-
-  // AWS WebSocket Setup
-  let awsWs = awsWsPool.get(deviceId);
-  if (!awsWs || awsWs.readyState === WebSocket.CLOSED || awsWs.readyState === WebSocket.CLOSING) {
-    awsWs = new WebSocket(`${process.env.AWS_WS_URL}?device_id=${deviceId}`, {
-      headers: {
-        'Authorization': `Bearer ${process.env.AWS_API_KEY || ''}`,
-      },
-    });
-    awsWsPool.set(deviceId, awsWs);
-
-    awsWs.on('open', () => {
-      const subscriptionMessage = JSON.stringify({ action: 'subscribe', device_id: deviceId });
-      awsWs.send(subscriptionMessage);
-      logger.info(`AWS WS subscribed for ${deviceId}: ${subscriptionMessage}`);
-    });
-
-    awsWs.on('message', async (awsMessage) => {
-      try {
-        const raw = JSON.parse(awsMessage.toString());
-        logger.info(`AWS WS message received for ${deviceId}: ${JSON.stringify(raw)}`);
-        const config = await getConfigAsync();
-        if (!config) {
-          logger.error(`Cannot process WebSocket message: No config for ${deviceId}`);
-          return;
-        }
-        const payload = raw.payload || (raw.items && raw.items[0]?.payload) || raw;
-        const parsed = parseCanData(payload, config);
-        // Select latest data if arrays
-        const latestData = {
-          battery: Array.isArray(parsed.battery)
-            ? parsed.battery.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0] || {}
-            : parsed.battery || {},
-          motor: Array.isArray(parsed.motor)
-            ? parsed.motor.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0] || {}
-            : parsed.motor || {},
-          faults: Array.isArray(parsed.faults)
-            ? parsed.faults.sort((a, b) => (b.faultTimestamp || 0) - (a.faultTimestamp || 0))[0] || {}
-            : parsed.faults || {},
-          timestamp: parsed.timestamp || Date.now(),
-        };
-        logger.info(`Sending parsed data to clients for ${deviceId}: ${JSON.stringify(latestData)}`);
-        await redisClient.delPattern(`getData:${deviceId}:*`);
-        wss.clients.forEach((client) => {
-          if (client.readyState === WebSocket.OPEN && client.deviceId === deviceId) {
-            client.send(JSON.stringify(latestData));
-          }
-        });
-      } catch (err) {
-        logger.error(`WS parse error for ${deviceId}: ${err.message}`);
-      }
-    });
-
-    awsWs.on('close', () => {
-      logger.info(`AWS WS closed for ${deviceId}`);
-      awsWsPool.delete(deviceId);
-    });
-
-    awsWs.on('error', (err) => logger.error(`AWS WS error for ${deviceId}: ${err.message}`));
+  // === JWT VERIFY ===
+  let user;
+  try {
+    user = jwt.verify(token, process.env.JWT_SECRET);
+    ws.user = user;
+    ws.deviceId = deviceId;
+    logger.info(`WS connected: ${user.email} → ${deviceId}`);
+  } catch (err) {
+    ws.close(4002, 'Invalid token');
+    return;
   }
 
-  ws.on('message', (message) => {
-    logger.info(`[${ws.user.username}] → ${message} for ${deviceId}`);
-    if (awsWs.readyState === WebSocket.OPEN) awsWs.send(message);
+  // === GET vehicle_master_id ===
+  const vehicleMasterId = await getVehicleMasterId(deviceId);
+  if (!vehicleMasterId) {
+    ws.close(4004, 'Vehicle not registered');
+    return;
+  }
+  ws.vehicleMasterId = vehicleMasterId;
+
+  // === ON MESSAGE: CAN FRAME FROM VCU ===
+  ws.on('message', async (msg) => {
+    let payloadHex;
+    try {
+      const data = JSON.parse(msg.toString());
+      payloadHex = data.payload || data.can_frame || msg.toString().trim();
+    } catch {
+      payloadHex = msg.toString().trim();
+    }
+
+    if (!payloadHex || !/^x?[0-9A-Fa-f]+$/.test(payloadHex.replace('x', ''))) {
+      logger.warn(`Invalid CAN frame from ${deviceId}: ${payloadHex}`);
+      return;
+    }
+
+    try {
+      const parsed = await parseCanDataWithDB(payloadHex, vehicleMasterId);
+
+      // === UPSERT live_values ===
+      const keys = Object.keys(parsed).filter(k => k !== 'timestamp');
+      if (keys.length > 0) {
+        const columns = ['vehicle_master_id', 'recorded_at', ...keys].join(', ');
+        const placeholders = keys.map((_, i) => `$${i + 3}`).join(', ');
+        const values = [vehicleMasterId, new Date(), ...keys.map(k => parsed[k])];
+
+        await db.query(`
+          INSERT INTO live_values (${columns})
+          VALUES ($1, $2, ${placeholders})
+          ON CONFLICT (vehicle_master_id) DO UPDATE SET
+            ${keys.map(k => `${k} = EXCLUDED.${k}`).join(', ')},
+            recorded_at = EXCLUDED.recorded_at
+        `, values);
+      }
+
+      // === SAVE FAULTS ===
+      if (parsed.fault_code) {
+        await db.query(`
+          INSERT INTO dtc_events (vehicle_master_id, code, description, recorded_at)
+          VALUES ($1, $2, $3, NOW())
+          ON CONFLICT (vehicle_master_id, code, recorded_at) DO NOTHING
+        `, [vehicleMasterId, parsed.fault_code, parsed.fault_description || 'Unknown']);
+      }
+
+      // === BROADCAST TO ALL CLIENTS ===
+      const broadcast = {
+        ...parsed,
+        timestamp: Date.now(),
+        deviceId,
+        vehicle_master_id: vehicleMasterId
+      };
+
+      wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN && client.deviceId === deviceId) {
+          client.send(JSON.stringify(broadcast));
+        }
+      });
+
+      logger.info(`CAN → DB → WS: ${deviceId} | ${payloadHex}`);
+    } catch (err) {
+      logger.error(`Parse error: ${err.message} | Payload: ${payloadHex}`);
+    }
   });
 
   ws.on('close', () => {
-    logger.info(`🔌 WebSocket closed for ${ws.user.username} (${deviceId})`);
-    // Only reconnect if there are still clients for this deviceId
-    const hasClients = Array.from(wss.clients).some(client => client.deviceId === deviceId && client.readyState === WebSocket.OPEN);
-    if (!hasClients) {
-      if (awsWs && awsWs.readyState === WebSocket.OPEN) {
-        awsWs.close();
-        awsWsPool.delete(deviceId);
-        logger.info(`Closed AWS WS for ${deviceId} due to no active clients`);
-      }
-    }
+    logger.info(`WS disconnected: ${user.email} (${deviceId})`);
   });
 
-  ws.on('error', (err) => logger.error(`Client WS error for ${deviceId}: ${err.message}`));
+  ws.on('error', (err) => logger.error(`WS error: ${err.message}`));
 });
 
-// Reconnect function
-function connectWebSocket(deviceId) {
-  // Only reconnect if there are active clients for this deviceId
-  const hasClients = Array.from(wss.clients).some(client => client.deviceId === deviceId && client.readyState === WebSocket.OPEN);
-  if (!hasClients) {
-    logger.info(`No active clients for ${deviceId}, skipping WebSocket reconnect`);
-    return;
-  }
+// === GRACEFUL SHUTDOWN ===
+process.on('SIGTERM', () => {
+  logger.info('Shutting down...');
+  wss.close();
+  server.close(() => process.exit(0));
+});
 
-  let awsWs = awsWsPool.get(deviceId);
-  if (!awsWs || awsWs.readyState === WebSocket.CLOSED || awsWs.readyState === WebSocket.CLOSING) {
-    awsWs = new WebSocket(`${process.env.AWS_WS_URL}?device_id=${deviceId}`, {
-      headers: {
-        'Authorization': `Bearer ${process.env.AWS_API_KEY || ''}`,
-      },
-    });
-    awsWsPool.set(deviceId, awsWs);
+process.on('SIGINT', () => {
+  logger.info('Interrupted. Stopping...');
+  process.exit(0);
+});
 
-    awsWs.on('open', () => {
-      const subscriptionMessage = JSON.stringify({ action: 'subscribe', device_id: deviceId });
-      awsWs.send(subscriptionMessage);
-      logger.info(`AWS WS re-subscribed for ${deviceId}: ${subscriptionMessage}`);
-    });
-
-    awsWs.on('message', async (awsMessage) => {
-      try {
-        const raw = JSON.parse(awsMessage.toString());
-        logger.info(`AWS WS message received for ${deviceId}: ${JSON.stringify(raw)}`);
-        const config = await getConfigAsync();
-        if (!config) {
-          logger.error(`Cannot process WebSocket message: No config for ${deviceId}`);
-          return;
-        }
-        const payload = raw.payload || (raw.items && raw.items[0]?.payload) || raw;
-        const parsed = parseCanData(payload, config);
-        // Select latest data if arrays
-        const latestData = {
-          battery: Array.isArray(parsed.battery)
-            ? parsed.battery.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0] || {}
-            : parsed.battery || {},
-          motor: Array.isArray(parsed.motor)
-            ? parsed.motor.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0] || {}
-            : parsed.motor || {},
-          faults: Array.isArray(parsed.faults)
-            ? parsed.faults.sort((a, b) => (b.faultTimestamp || 0) - (a.faultTimestamp || 0))[0] || {}
-            : parsed.faults || {},
-          timestamp: parsed.timestamp || Date.now(),
-        };
-        logger.info(`Sending parsed data to clients for ${deviceId}: ${JSON.stringify(latestData)}`);
-        await redisClient.delPattern(`getData:${deviceId}:*`);
-        wss.clients.forEach((client) => {
-          if (client.readyState === WebSocket.OPEN && client.deviceId === deviceId) {
-            client.send(JSON.stringify(latestData));
-          }
-        });
-      } catch (err) {
-        logger.error(`WS parse error for ${deviceId}: ${err.message}`);
-      }
-    });
-
-    awsWs.on('close', () => {
-      logger.info(`AWS WS closed for ${deviceId}`);
-      awsWsPool.delete(deviceId);
-      setTimeout(() => connectWebSocket(deviceId), 5000);
-    });
-
-    awsWs.on('error', (err) => logger.error(`AWS WS error for ${deviceId}: ${err.message}`));
-  }
-}
-
-// Graceful Shutdown
-let isSigtermRegistered = false;
-if (!isSigtermRegistered) {
-  process.on('SIGTERM', () => {
-    logger.info('Received SIGTERM, shutting down...');
-    wss.close(() => logger.info('WSS closed'));
-    awsWsPool.forEach(ws => ws.close());
-    server.close(() => {
-      logger.info('HTTP server closed');
-      process.exit(0);
-    });
-  });
-  isSigtermRegistered = true;
-}
+module.exports = app;

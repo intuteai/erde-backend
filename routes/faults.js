@@ -1,43 +1,30 @@
+// routes/faults.js
 const express = require('express');
-const jwt = require('jsonwebtoken');
-const db = require('../config/db');
+const db = require('../config/postgres');
+const authenticateToken = require('../middleware/auth');
+const checkPermission = require('../middleware/checkPermission');
 const logger = require('../utils/logger');
 
 const router = express.Router();
 
-// Middleware to verify JWT
-const authenticate = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    logger.error('Faults route: Missing or invalid authorization header');
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+// GET /api/faults/:id
+router.get('/:id', authenticateToken, checkPermission('faults', 'read'), async (req, res) => {
+  const { id } = req.params;
+  const days = parseInt(req.query.days) || 30;
 
-  const token = authHeader.split(' ')[1];
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    next();
+    const result = await db.query(
+      `SELECT dtc_id, code, description, status, recorded_at
+       FROM dtc_events
+       WHERE vehicle_master_id = $1
+         AND recorded_at >= NOW() - INTERVAL '${days} days'
+       ORDER BY recorded_at DESC`,
+      [id]
+    );
+    res.json(result.rows);
   } catch (err) {
-    logger.error('Faults route: Invalid token:', err.message);
-    res.status(401).json({ error: 'Invalid or expired token' });
-  }
-};
-
-// Get faults data
-router.get('/', authenticate, async (req, res) => {
-  const deviceId = req.query.device_id || 'VCL001';
-  try {
-    const data = await db.query('faults', { device_id: deviceId });
-    logger.info(`Fetched faults data for device ${deviceId}`);
-    // Return latest entry if array
-    const latestData = Array.isArray(data)
-      ? data.sort((a, b) => (b.faultTimestamp || 0) - (a.faultTimestamp || 0))[0] || {}
-      : data;
-    res.json(latestData);
-  } catch (err) {
-    logger.error(`Error fetching faults data for ${deviceId}:`, err.message);
-    res.status(500).json({ error: 'Internal server error' });
+    logger.error(`GET /faults/${id} error: ${err.message}`);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
