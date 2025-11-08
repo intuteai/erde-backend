@@ -38,15 +38,33 @@ const stripTrailingSlash = s => String(s || '').replace(/\/+$/, '');
 const normalizeOrigin = s => stripTrailingSlash(String(s || '').trim()).toLowerCase();
 
 const parseOrigins = (...vals) => {
-  const items = [];
+  const out = [];
   vals.filter(Boolean).forEach(v => {
-    String(v)
-      .split(',')
-      .map(p => normalizeOrigin(p))
-      .filter(Boolean)
-      .forEach(x => items.push(x));
+    let raw = String(v).trim();
+
+    // Accept JSON-style arrays: ["https://a","http://b"]
+    if (/^\s*\[/.test(raw)) {
+      try {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) {
+          arr.forEach(item => {
+            const norm = normalizeOrigin(item);
+            if (norm) out.push(norm);
+          });
+          return;
+        }
+      } catch (_) {
+        // fall through to CSV parser
+      }
+    }
+
+    // CSV: a,b,c (also strip accidental quotes)
+    raw.split(',').forEach(p => {
+      const token = normalizeOrigin(p.replace(/^"+|"+$/g, '').replace(/^'+|'+$/g, ''));
+      if (token) out.push(token);
+    });
   });
-  return Array.from(new Set(items));
+  return Array.from(new Set(out));
 };
 
 const envOrigins = parseOrigins(
@@ -63,13 +81,14 @@ const defaultOrigins = [
   'http://localhost:5173',
   'http://127.0.0.1:3000',
   'http://127.0.0.1:5173',
+  // Production:
   'https://analytics.erdeenergy.in',
   'http://analytics.erdeenergy.in',
 ].map(normalizeOrigin);
 
 const allowedOriginsRaw = envOrigins.length > 0 ? envOrigins : defaultOrigins;
 
-// Support exact matches and optional “dot-domain” suffix patterns, e.g. ".erdeenergy.in"
+// exact matches and optional “dot-domain” patterns, e.g. ".erdeenergy.in"
 const exactSet = new Set(allowedOriginsRaw.filter(o => !o.startsWith('.')));
 const dotDomains = allowedOriginsRaw.filter(o => o.startsWith('.')); // like ".erdeenergy.in"
 const allowAll = exactSet.has('*');
@@ -77,11 +96,21 @@ const allowAll = exactSet.has('*');
 const originAllowed = (origin) => {
   // Allow requests with no Origin header (curl, Postman, mobile apps)
   if (!origin) return true;
-
   if (allowAll) return true;
 
-  const o = normalizeOrigin(origin);
-  if (exactSet.has(o)) return true;
+  let o = normalizeOrigin(origin);
+
+  // Normalize default ports
+  o = o.replace(':80', '').replace(':443', '');
+
+  // Try both scheme variants to be forgiving
+  const variants = [
+    o,
+    o.replace(/^https:/, 'http:'),
+    o.replace(/^http:/, 'https:')
+  ];
+
+  if (variants.some(v => exactSet.has(v))) return true;
 
   try {
     const url = new URL(o);
@@ -89,7 +118,7 @@ const originAllowed = (origin) => {
     // allow if any .domain pattern matches
     if (dotDomains.some(d => host === d.slice(1) || host.endsWith(d))) return true;
   } catch (_) {
-    // If URL parsing fails, fall through to deny
+    // ignore parse errors
   }
 
   return false;
@@ -107,8 +136,9 @@ const corsOptions = {
   optionsSuccessStatus: 204,
 };
 
-// Apply CORS (handles preflight automatically)
+// Apply CORS and handle preflight globally (prevents 500 on OPTIONS)
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 // ================================
 // BODY PARSING
