@@ -8,6 +8,9 @@ const db = require('./config/postgres');
 const { parseCanDataWithDB } = require('./services/dbParser');
 const logger = require('./utils/logger');
 
+// === TELEMETRY SERVICE ===
+const { insertTelemetryItems } = require('./services/telemetryService');
+
 // === ROUTES ===
 const authRoutes = require('./routes/auth');
 const vehicleRoutes = require('./routes/vehicle');
@@ -18,70 +21,135 @@ const configRoutes = require('./routes/config');
 const vehicleTypeRoutes = require('./routes/vehicleType');
 const vcuHmiRoutes = require('./routes/vcuHmi');
 const customerRoutes = require('./routes/customer');
-const vehicleMasterRoutes = require('./routes/vehicleMaster');
+const vehicleMasterRoutes = require('./routes/vehicle-master');
 
 const app = express();
 const PORT = process.env.SERVER_PORT || 5000;
 
-// === DYNAMIC CORS — SUPPORTS VITE (5173), CRA (3000), etc. ===
+// === DYNAMIC CORS ===
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:5173',
   'http://127.0.0.1:3000',
   'http://127.0.0.1:5173',
-  // Add production later: 'https://yourdomain.com'
+  // Add your production frontend here later
 ];
 
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow non-browser clients (Postman, mobile, etc.)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      logger.warn(`CORS blocked origin: ${origin}`);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        logger.warn(`CORS blocked origin: ${origin}`);
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
+  })
+);
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // === API ROUTES ===
 app.use('/api/auth', authRoutes);
+app.use('/api/customers', customerRoutes);
+app.use('/api/vehicle-types', vehicleTypeRoutes);
+app.use('/api/vcu-hmi', vcuHmiRoutes);
+app.use('/api/vehicle-master', vehicleMasterRoutes);
 app.use('/api/vehicles', vehicleRoutes);
 app.use('/api/battery', batteryRoutes);
 app.use('/api/motor', motorRoutes);
 app.use('/api/faults', faultsRoutes);
 app.use('/api/config', configRoutes);
-app.use('/api/vehicle-types', vehicleTypeRoutes);
-app.use('/api/vcu-hmi', vcuHmiRoutes);
-app.use('/api/customers', customerRoutes);
-app.use('/api/vehicles-master', vehicleMasterRoutes);
+
+// === TELEMETRY ENDPOINT (from app dev) ===
+app.post('/telemetryFn', async (req, res) => {
+  try {
+    // === SECURITY: API Key Check ===
+    const apiKey = req.headers['x-api-key'];
+    if (apiKey !== process.env.TELEMETRY_API_KEY) {
+      logger.warn(`Unauthorized /telemetryFn access: Invalid API key from ${req.ip}`);
+      return res.status(401).json({ error: 'Invalid API key' });
+    }
+
+    const items = req.body.items || [];
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'Invalid or empty items array' });
+    }
+
+    logger.info(`[/telemetryFn] Received ${items.length} telemetry items`);
+
+    const { inserted } = await insertTelemetryItems(items);
+
+    // === BROADCAST LATEST TELEMETRY via WebSocket ===
+    const latestItem = items[items.length - 1];
+    const vehicleMasterId = latestItem.vehicleIdOrMasterId;
+
+    if (vehicleMasterId && latestItem.live) {
+      const broadcast = {
+        ...latestItem.live,
+        timestamp: latestItem.ts,
+        deviceId: vehicleMasterId,
+        vehicle_master_id: vehicleMasterId,
+      };
+
+      wss.clients.forEach(client => {
+        if (
+          client.readyState === WebSocket.OPEN &&
+          client.vehicleMasterId == vehicleMasterId
+        ) {
+          client.send(JSON.stringify(broadcast));
+        }
+      });
+    }
+
+    res.json({ ok: true, inserted });
+  } catch (err) {
+    logger.error('[/telemetryFn] Error:', err.message, { stack: err.stack });
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // === HEALTH CHECK ===
 app.get('/health', async (req, res) => {
   try {
     await db.query('SELECT 1');
-    res.json({ status: 'OK', db: 'connected', timestamp: new Date().toISOString() });
+    res.json({
+      status: 'OK',
+      db: 'connected',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime().toFixed(2) + 's',
+    });
   } catch {
     res.status(500).json({ status: 'ERROR', db: 'disconnected' });
   }
 });
 
-// === START HTTP SERVER ===
-const server = app.listen(PORT, () => {
-  logger.info(`EV Dashboard Backend LIVE on http://localhost:${PORT}`);
+// === 404 HANDLER ===
+app.use('*', (req, res) => {
+  res.status(404).json({ error: 'Route not found' });
 });
 
-// === WEBSOCKET SERVER — REAL CAN INGRESS (NO AWS) ===
+// === GLOBAL ERROR HANDLER ===
+app.use((err, req, res, next) => {
+  logger.error(`Unhandled error: ${err.message}`, { stack: err.stack });
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// === START SERVER ===
+const server = app.listen(PORT, () => {
+  logger.info(`EV Dashboard Backend LIVE on http://localhost:${PORT}`);
+  logger.info(`Telemetry Endpoint: POST /telemetryFn (x-api-key required)`);
+  logger.info(`WebSocket: ws://localhost:${PORT}?token=...&device_id=...`);
+});
+
+// === WEBSOCKET SERVER ===
 const wss = new WebSocket.Server({ server });
 
-// Map device_unique_id → vehicle_master_id
 const getVehicleMasterId = async (deviceId) => {
   try {
     const res = await db.query(
@@ -100,13 +168,11 @@ wss.on('connection', async (ws, req) => {
   const token = url.searchParams.get('token');
   const deviceId = url.searchParams.get('device_id');
 
-  // === VALIDATE ===
   if (!token || !deviceId) {
     ws.close(4001, 'Token and device_id required');
     return;
   }
 
-  // === JWT VERIFY ===
   let user;
   try {
     user = jwt.verify(token, process.env.JWT_SECRET);
@@ -118,7 +184,6 @@ wss.on('connection', async (ws, req) => {
     return;
   }
 
-  // === GET vehicle_master_id ===
   const vehicleMasterId = await getVehicleMasterId(deviceId);
   if (!vehicleMasterId) {
     ws.close(4004, 'Vehicle not registered');
@@ -126,7 +191,6 @@ wss.on('connection', async (ws, req) => {
   }
   ws.vehicleMasterId = vehicleMasterId;
 
-  // === ON MESSAGE: CAN FRAME FROM VCU ===
   ws.on('message', async (msg) => {
     let payloadHex;
     try {
@@ -136,7 +200,8 @@ wss.on('connection', async (ws, req) => {
       payloadHex = msg.toString().trim();
     }
 
-    if (!payloadHex || !/^x?[0-9A-Fa-f]+$/.test(payloadHex.replace('x', ''))) {
+    payloadHex = payloadHex.replace(/^0x/i, '').trim();
+    if (!payloadHex || !/^[0-9A-Fa-f]+$/.test(payloadHex)) {
       logger.warn(`Invalid CAN frame from ${deviceId}: ${payloadHex}`);
       return;
     }
@@ -144,7 +209,6 @@ wss.on('connection', async (ws, req) => {
     try {
       const parsed = await parseCanDataWithDB(payloadHex, vehicleMasterId);
 
-      // === UPSERT live_values ===
       const keys = Object.keys(parsed).filter(k => k !== 'timestamp');
       if (keys.length > 0) {
         const columns = ['vehicle_master_id', 'recorded_at', ...keys].join(', ');
@@ -160,7 +224,6 @@ wss.on('connection', async (ws, req) => {
         `, values);
       }
 
-      // === SAVE FAULTS ===
       if (parsed.fault_code) {
         await db.query(`
           INSERT INTO dtc_events (vehicle_master_id, code, description, recorded_at)
@@ -169,12 +232,11 @@ wss.on('connection', async (ws, req) => {
         `, [vehicleMasterId, parsed.fault_code, parsed.fault_description || 'Unknown']);
       }
 
-      // === BROADCAST TO ALL CLIENTS ===
       const broadcast = {
         ...parsed,
         timestamp: Date.now(),
         deviceId,
-        vehicle_master_id: vehicleMasterId
+        vehicle_master_id: vehicleMasterId,
       };
 
       wss.clients.forEach(client => {
@@ -197,15 +259,14 @@ wss.on('connection', async (ws, req) => {
 });
 
 // === GRACEFUL SHUTDOWN ===
-process.on('SIGTERM', () => {
-  logger.info('Shutting down...');
+const gracefulShutdown = (signal) => {
+  logger.info(`${signal} received. Shutting down...`);
   wss.close();
   server.close(() => process.exit(0));
-});
+  setTimeout(() => process.exit(1), 10000);
+};
 
-process.on('SIGINT', () => {
-  logger.info('Interrupted. Stopping...');
-  process.exit(0);
-});
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 module.exports = app;
