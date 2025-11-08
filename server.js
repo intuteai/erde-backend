@@ -168,21 +168,25 @@ wss.on('connection', async (ws, req) => {
         const placeholders = keys.map((_, i) => `$${i + 3}`).join(', ');
         const values = [vehicleMasterId, new Date(), ...keys.map(k => parsed[k])];
 
-        await db.query(`
+        // ✅ Append-only insert into live_values (NO upsert)
+        await db.query(
+          `
           INSERT INTO live_values (${columns})
           VALUES ($1, $2, ${placeholders})
-          ON CONFLICT (vehicle_master_id) DO UPDATE SET
-            ${keys.map(k => `${k} = EXCLUDED.${k}`).join(', ')},
-            recorded_at = EXCLUDED.recorded_at
-        `, values);
+          `,
+          values
+        );
       }
 
       if (parsed.fault_code) {
-        await db.query(`
+        // ✅ Append-only insert into dtc_events (NO upsert)
+        await db.query(
+          `
           INSERT INTO dtc_events (vehicle_master_id, code, description, recorded_at)
           VALUES ($1, $2, $3, NOW())
-          ON CONFLICT (vehicle_master_id, code, recorded_at) DO NOTHING
-        `, [vehicleMasterId, parsed.fault_code, parsed.fault_description || 'Unknown']);
+          `,
+          [vehicleMasterId, parsed.fault_code, parsed.fault_description || 'Unknown']
+        );
       }
 
       const broadcast = {
