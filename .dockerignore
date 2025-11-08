@@ -1,0 +1,34 @@
+# Node & dependencies
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-lock.yaml
+
+# Logs and runtime artifacts
+logs
+*.log
+tmp
+coverage
+
+# Local environment
+.env
+.env.local
+.env.*.local
+
+# Build artifacts (if you use TypeScript)
+dist
+build
+
+# System files
+.DS_Store
+Thumbs.db
+
+# IDE / tooling
+.vscode
+.idea
+*.swp
+
+# Git & metadata
+.git
+.gitignore
