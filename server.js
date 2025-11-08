@@ -34,20 +34,16 @@ const PORT = Number(process.env.PORT || process.env.SERVER_PORT || 5000);
 // ================================
 // CORS CONFIG – ROBUST & SAFE
 // ================================
-const stripTrailingSlash = s => String(s || '').replace(/\/+$/, '');
-const normalizeOrigin = s => stripTrailingSlash(String(s || '').trim()).toLowerCase();
-
-const parseOrigins = (...vals) => {
-  const items = [];
-  vals.filter(Boolean).forEach(v => {
-    String(v)
-      .split(',')
-      .map(p => normalizeOrigin(p))
-      .filter(Boolean)
-      .forEach(x => items.push(x));
-  });
-  return Array.from(new Set(items));
-};
+const parseOrigins = (...vals) =>
+  Array.from(
+    new Set(
+      vals
+        .filter(Boolean)
+        .flatMap(v => String(v).trim().split(','))
+        .map(s => s.trim())
+        .filter(Boolean)
+    )
+  );
 
 const envOrigins = parseOrigins(
   process.env.ALLOWED_ORIGINS,
@@ -65,46 +61,26 @@ const defaultOrigins = [
   'http://127.0.0.1:5173',
   'https://analytics.erdeenergy.in',
   'http://analytics.erdeenergy.in',
-].map(normalizeOrigin);
+];
 
-const allowedOriginsRaw = envOrigins.length > 0 ? envOrigins : defaultOrigins;
-
-// Support exact matches and optional “dot-domain” suffix patterns, e.g. ".erdeenergy.in"
-const exactSet = new Set(allowedOriginsRaw.filter(o => !o.startsWith('.')));
-const dotDomains = allowedOriginsRaw.filter(o => o.startsWith('.')); // like ".erdeenergy.in"
-const allowAll = exactSet.has('*');
-
-const originAllowed = (origin) => {
-  // Allow requests with no Origin header (curl, Postman, mobile apps)
-  if (!origin) return true;
-
-  if (allowAll) return true;
-
-  const o = normalizeOrigin(origin);
-  if (exactSet.has(o)) return true;
-
-  try {
-    const url = new URL(o);
-    const host = url.hostname;
-    // allow if any .domain pattern matches
-    if (dotDomains.some(d => host === d.slice(1) || host.endsWith(d))) return true;
-  } catch (_) {
-    // If URL parsing fails, fall through to deny
-  }
-
-  return false;
-};
+const allowedOrigins = envOrigins.length > 0 ? envOrigins : defaultOrigins;
+const allowAll = allowedOrigins.includes('*');
 
 const corsOptions = {
   origin(origin, callback) {
-    if (originAllowed(origin)) return callback(null, true);
-    logger.warn(`CORS blocked origin: ${origin} | Allowed: ${[...exactSet, ...dotDomains].join(', ')}`);
+    // Allow requests with no origin (like mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+
+    if (allowAll || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    logger.warn(`CORS blocked origin: ${origin} | Allowed: ${allowedOrigins.join(', ')}`);
     return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key', 'X-Requested-With'],
-  optionsSuccessStatus: 204,
 };
 
 // Apply CORS (handles preflight automatically)
@@ -238,13 +214,6 @@ const getVehicleMasterId = async (deviceId) => {
 };
 
 wss.on('connection', async (ws, req) => {
-  // Enforce WS origin parity with HTTP CORS
-  const origin = req.headers.origin;
-  if (!originAllowed(origin)) {
-    ws.close(4003, 'WS origin not allowed');
-    return;
-  }
-
   const url = new URL(req.url, `http://${req.headers.host}`);
   const token = url.searchParams.get('token');
   const deviceId = url.searchParams.get('device_id');
