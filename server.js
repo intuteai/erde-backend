@@ -8,29 +8,37 @@ const db = require('./config/postgres');
 const { parseCanDataWithDB } = require('./services/dbParser');
 const logger = require('./utils/logger');
 
-// === ROUTES ===
+/* ============================
+   ROUTE IMPORTS
+============================ */
 const authRoutes = require('./routes/auth');
+const customerRoutes = require('./routes/customer');
+const vehicleTypeRoutes = require('./routes/vehicleType');
+const vehicleCategoryRoutes = require('./routes/vehicleCategory');
+const vehicleMasterRoutes = require('./routes/vehicle-master');
 const vehicleRoutes = require('./routes/vehicle');
 const batteryRoutes = require('./routes/battery');
 const motorRoutes = require('./routes/motor');
 const faultsRoutes = require('./routes/faults');
 const configRoutes = require('./routes/config');
-const vehicleTypeRoutes = require('./routes/vehicleType');
-const vcuHmiRoutes = require('./routes/vcuHmi');
-const customerRoutes = require('./routes/customer');
-const vehicleMasterRoutes = require('./routes/vehicle-master');
-const telemetryRoutes = require('./routes/telemetry'); // ✅ New route
+const telemetryRoutes = require('./routes/telemetry');
+const databaseLogsRoutes = require('./routes/databaseLogs'); // ✅ ADDED
+
+/* === SEPARATED ROUTES === */
+const vcuRoutes = require('./routes/vcu');
+const hmiRoutes = require('./routes/hmi');
 
 const app = express();
 const PORT = process.env.SERVER_PORT || 5000;
 
-// === DYNAMIC CORS ===
+/* ============================
+   CORS CONFIG
+============================ */
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:5173',
   'http://127.0.0.1:3000',
   'http://127.0.0.1:5173',
-  // Add your production frontend here later
   'http://analytics.erdeenergy.in',
   'https://analytics.erdeenergy.in',
 ];
@@ -54,20 +62,32 @@ app.use(
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// === API ROUTES ===
+/* ============================
+   API ROUTES
+============================ */
 app.use('/api/auth', authRoutes);
 app.use('/api/customers', customerRoutes);
+
 app.use('/api/vehicle-types', vehicleTypeRoutes);
-app.use('/api/vcu-hmi', vcuHmiRoutes);
+app.use('/api/vehicle-categories', vehicleCategoryRoutes);
+
+/* CORE */
 app.use('/api/vehicle-master', vehicleMasterRoutes);
 app.use('/api/vehicles', vehicleRoutes);
 app.use('/api/battery', batteryRoutes);
 app.use('/api/motor', motorRoutes);
 app.use('/api/faults', faultsRoutes);
+app.use('/api/database-logs', databaseLogsRoutes); // ✅ ADDED
 app.use('/api/config', configRoutes);
-app.use('/api/telemetry', telemetryRoutes); // ✅ Added telemetry route
+app.use('/api/telemetry', telemetryRoutes);
 
-// === HEALTH CHECK ===
+/* SEPARATED */
+app.use('/api/vcu', vcuRoutes);
+app.use('/api/hmi', hmiRoutes);
+
+/* ============================
+   HEALTH CHECK
+============================ */
 app.get('/health', async (req, res) => {
   try {
     await db.query('SELECT 1');
@@ -82,25 +102,33 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// === 404 HANDLER ===
+/* ============================
+   404 HANDLER
+============================ */
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Route not found' });
 });
 
-// === GLOBAL ERROR HANDLER ===
+/* ============================
+   GLOBAL ERROR HANDLER
+============================ */
 app.use((err, req, res, next) => {
   logger.error(`Unhandled error: ${err.message}`, { stack: err.stack });
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// === START SERVER ===
+/* ============================
+   START SERVER
+============================ */
 const server = app.listen(PORT, () => {
   logger.info(`EV Dashboard Backend LIVE on http://localhost:${PORT}`);
   logger.info(`Telemetry Endpoint: POST /api/telemetry (x-api-key required)`);
   logger.info(`WebSocket: ws://localhost:${PORT}?token=...&device_id=...`);
 });
 
-// === WEBSOCKET SERVER ===
+/* ============================
+   WEBSOCKET SERVER
+============================ */
 const wss = new WebSocket.Server({ server });
 
 const getVehicleMasterId = async (deviceId) => {
@@ -132,7 +160,7 @@ wss.on('connection', async (ws, req) => {
     ws.user = user;
     ws.deviceId = deviceId;
     logger.info(`WS connected: ${user.email} → ${deviceId}`);
-  } catch (err) {
+  } catch {
     ws.close(4002, 'Invalid token');
     return;
   }
@@ -168,18 +196,13 @@ wss.on('connection', async (ws, req) => {
         const placeholders = keys.map((_, i) => `$${i + 3}`).join(', ');
         const values = [vehicleMasterId, new Date(), ...keys.map(k => parsed[k])];
 
-        // ✅ Append-only insert into live_values (NO upsert)
         await db.query(
-          `
-          INSERT INTO live_values (${columns})
-          VALUES ($1, $2, ${placeholders})
-          `,
+          `INSERT INTO live_values (${columns}) VALUES ($1, $2, ${placeholders})`,
           values
         );
       }
 
       if (parsed.fault_code) {
-        // ✅ Append-only insert into dtc_events (NO upsert)
         await db.query(
           `
           INSERT INTO dtc_events (vehicle_master_id, code, description, recorded_at)
@@ -209,13 +232,15 @@ wss.on('connection', async (ws, req) => {
   });
 
   ws.on('close', () => {
-    logger.info(`WS disconnected: ${user.email} (${deviceId})`);
+    logger.info(`WS disconnected: ${ws.user?.email} (${deviceId})`);
   });
 
   ws.on('error', (err) => logger.error(`WS error: ${err.message}`));
 });
 
-// === GRACEFUL SHUTDOWN ===
+/* ============================
+   GRACEFUL SHUTDOWN
+============================ */
 const gracefulShutdown = (signal) => {
   logger.info(`${signal} received. Shutting down...`);
   wss.close();
