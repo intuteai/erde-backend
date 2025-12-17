@@ -58,7 +58,7 @@ const insertTelemetryItems = async (items = []) => {
         vehicleIdOrMasterId,
         ts,
 
-        // Battery
+        // ================= BATTERY =================
         toNum(live.soc_percent),
         toNum(live.stack_voltage_v),
         toText(live.battery_status),
@@ -72,11 +72,11 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.charger_current_demand_a),
         toNum(live.charger_voltage_demand_v),
 
-        // Modules
+        // ================= MODULES =================
         cellVoltages,
         tempSensors,
 
-        // Motor / MCU
+        // ================= MOTOR / MCU =================
         toNum(live.motor_torque_limit),
         toNum(live.motor_torque_value),
         live.motor_speed_rpm ?? null,
@@ -90,13 +90,24 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.mcu_temp_c),
         toNum(live.radiator_temp_c),
 
-        // ODO / Trip
+        // ================= DCDC (NEW) =================
+        toNum(live.dcdc_pri_a_mosfet_temp_c),
+        toNum(live.dcdc_sec_ls_mosfet_temp_c),
+        toNum(live.dcdc_sec_hs_mosfet_temp_c),
+        toNum(live.dcdc_pri_c_mosfet_temp_c),
+        toNum(live.dcdc_input_voltage_v),
+        toNum(live.dcdc_input_current_a),
+        toNum(live.dcdc_output_voltage_v),
+        toNum(live.dcdc_output_current_a),
+        live.dcdc_occurence_count ?? null,
+
+        // ================= ODO / ENERGY =================
         toInterval(live.total_running_hrs),
         toInterval(live.last_trip_hrs),
         toNum(live.total_kwh_consumed),
         toNum(live.last_trip_kwh),
 
-        // Alarms
+        // ================= ALARMS =================
         live.alarms ? JSON.stringify(live.alarms) : JSON.stringify({})
       ];
 
@@ -118,6 +129,17 @@ const insertTelemetryItems = async (items = []) => {
           motor_ac_current_a, motor_ac_voltage_v, dc_side_voltage_v,
           motor_temp_c, mcu_temp_c, radiator_temp_c,
 
+          -- DCDC
+          dcdc_pri_a_mosfet_temp_c,
+          dcdc_sec_ls_mosfet_temp_c,
+          dcdc_sec_hs_mosfet_temp_c,
+          dcdc_pri_c_mosfet_temp_c,
+          dcdc_input_voltage_v,
+          dcdc_input_current_a,
+          dcdc_output_voltage_v,
+          dcdc_output_current_a,
+          dcdc_occurence_count,
+
           total_running_hrs, last_trip_hrs,
           total_kwh_consumed, last_trip_kwh,
 
@@ -138,10 +160,14 @@ const insertTelemetryItems = async (items = []) => {
           $23, $24, $25,
           $26, $27, $28,
 
-          $29::interval, $30::interval,
-          $31, $32,
+          -- DCDC
+          $29, $30, $31, $32,
+          $33, $34, $35, $36, $37,
 
-          $33::jsonb
+          $38::interval, $39::interval,
+          $40, $41,
+
+          $42::jsonb
         )
         `,
         values
