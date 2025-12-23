@@ -189,6 +189,19 @@ router.get(
         /* ================= PERIPHERALS ================= */
         radiator_temp_c: val(r.radiator_temp_c),
 
+        /* ================= DC-DC CONVERTER ================= */
+        dcdc_input_voltage_v: val(r.dcdc_input_voltage_v),
+        dcdc_input_current_a: val(r.dcdc_input_current_a),
+        dcdc_output_voltage_v: val(r.dcdc_output_voltage_v),
+        dcdc_output_current_a: val(r.dcdc_output_current_a),
+
+        dcdc_pri_a_mosfet_temp_c: val(r.dcdc_pri_a_mosfet_temp_c),
+        dcdc_pri_c_mosfet_temp_c: val(r.dcdc_pri_c_mosfet_temp_c),
+        dcdc_sec_ls_mosfet_temp_c: val(r.dcdc_sec_ls_mosfet_temp_c),
+        dcdc_sec_hs_mosfet_temp_c: val(r.dcdc_sec_hs_mosfet_temp_c),
+
+        dcdc_occurence_count: val(r.dcdc_occurence_count),
+
         /* ================= ODO / TRIP ================= */
         total_hours: intervalToHours(r.total_running_hrs),
         last_trip_hrs: intervalToHours(r.last_trip_hrs),
@@ -196,7 +209,7 @@ router.get(
         last_trip_kwh: val(r.last_trip_kwh),
       };
 
-      /* ============ SAFE DERIVATION: DC POWER ============ */
+      /* ============ SAFE DERIVATION: DC OUTPUT POWER ============ */
       if (r.stack_voltage_v != null && r.battery_current_a != null) {
         response.output_power_kw =
           (r.stack_voltage_v * r.battery_current_a) / 1000;
