@@ -21,16 +21,25 @@ router.get(
         `
         SELECT
           day,
+
+          -- cumulative metrics
           total_kwh_consumed,
-          max_cell_temp_c,
-          avg_cell_temp_c,
           max_power_delivered_kw,
           max_op_dc_current_a,
+
+          -- daily thermal
+          max_cell_temp_c,
+          avg_cell_temp_c,
+
+          -- last trip metrics
           max_power_last_trip,
-          kwh_last_trip
+          kwh_last_trip,
+          max_cell_temp_last_trip,
+          avg_cell_temp_last_trip
+
         FROM battery_analytics_daily
         WHERE vehicle_master_id = $1
-          AND day >= CURRENT_DATE - ($2 || ' days')::interval
+          AND day >= CURRENT_DATE - ($2 * INTERVAL '1 day')
         ORDER BY day DESC
         `,
         [id, days]
@@ -38,7 +47,9 @@ router.get(
 
       res.json(result.rows);
     } catch (err) {
-      logger.error(`GET /battery/analytics/${id} error: ${err.message}`);
+      logger.error(`GET /battery/analytics/${id} error: ${err.message}`, {
+        stack: err.stack,
+      });
       res.status(500).json({ error: 'Server error' });
     }
   }

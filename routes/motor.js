@@ -21,12 +21,22 @@ router.get(
         `
         SELECT
           day,
+
+          /* ===== DAILY PEAKS ===== */
           max_op_power_kw,
           max_op_torque_nm,
-          max_motor_temp_c
+          max_op_current_a,
+          max_motor_temp_c,
+
+          /* ===== LAST TRIP PEAKS ===== */
+          max_op_power_last_trip,
+          max_op_torque_last_trip,
+          max_op_current_last_trip,
+          max_motor_temp_last_trip
+
         FROM motor_analytics_daily
         WHERE vehicle_master_id = $1
-          AND day >= CURRENT_DATE - ($2 || ' days')::interval
+          AND day >= CURRENT_DATE - ($2 * INTERVAL '1 day')
         ORDER BY day DESC
         `,
         [id, days]
@@ -34,7 +44,9 @@ router.get(
 
       res.json(result.rows);
     } catch (err) {
-      logger.error(`GET /motor/analytics/${id} error: ${err.message}`);
+      logger.error(`GET /motor/analytics/${id} error: ${err.message}`, {
+        stack: err.stack,
+      });
       res.status(500).json({ error: 'Server error' });
     }
   }
