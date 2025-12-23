@@ -44,8 +44,7 @@ router.get(
   checkPermission('vehicles', 'read'),
   async (req, res) => {
     try {
-      const result = await db.query(
-        `
+      const result = await db.query(`
         SELECT 
           vm.vehicle_master_id,
           vm.vehicle_unique_id,
@@ -61,8 +60,8 @@ router.get(
         JOIN customer_master cm ON vm.customer_id = cm.customer_id
         JOIN vehicle_type_master vt ON vm.vtype_id = vt.vtype_id
         ORDER BY vm.vehicle_unique_id
-        `
-      );
+      `);
+
       res.json(result.rows);
     } catch (err) {
       logger.error(`GET /vehicles error: ${err.message}`);
@@ -167,6 +166,13 @@ router.get(
         dc_current_a: val(r.battery_current_a),
         charging_current_a: val(r.charger_current_demand_a),
 
+        // battery voltage summary (DB present, previously missing)
+        max_voltage_v: val(r.max_voltage_v),
+        min_voltage_v: val(r.min_voltage_v),
+        avg_voltage_v: val(r.avg_voltage_v),
+
+        charger_voltage_demand_v: val(r.charger_voltage_demand_v),
+
         /* ================= MODULES ================= */
         cell_voltages: val(r.cell_voltages),
         temp_sensors: val(r.temp_sensors),
@@ -185,6 +191,9 @@ router.get(
         motor_temp_c: val(r.motor_temp_c),
         mcu_temp_c: val(r.mcu_temp_c),
         mcu_enable_state: val(r.mcu_enable_state),
+
+        /* ================= DC BUS ================= */
+        dc_side_voltage_v: val(r.dc_side_voltage_v),
 
         /* ================= PERIPHERALS ================= */
         radiator_temp_c: val(r.radiator_temp_c),
