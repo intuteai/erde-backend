@@ -67,6 +67,15 @@ router.post(
       });
     }
 
+    if (
+      typeof make !== 'string' ||
+      typeof model !== 'string' ||
+      !make.trim() ||
+      !model.trim()
+    ) {
+      return res.status(400).json({ error: 'Invalid make or model' });
+    }
+
     try {
       const result = await db.query(
         `
@@ -108,7 +117,7 @@ router.post(
 );
 
 /* ============================================================
-   UPDATE VEHICLE TYPE
+   UPDATE VEHICLE TYPE  ✅ FIXED
 ============================================================ */
 router.put(
   '/:id',
@@ -127,7 +136,35 @@ router.put(
     } = req.body;
 
     try {
-      const result = await db.query(
+      /* 1️⃣ Validate ID */
+      if (isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid vehicle type id' });
+      }
+
+      /* 2️⃣ Check existence FIRST */
+      const existing = await db.query(
+        `SELECT vtype_id FROM vehicle_type_master WHERE vtype_id = $1`,
+        [id]
+      );
+
+      if (existing.rowCount === 0) {
+        return res.status(404).json({ error: 'Vehicle type not found' });
+      }
+
+      /* 3️⃣ Validate input AFTER existence */
+      if (
+        !make ||
+        !model ||
+        typeof make !== 'string' ||
+        typeof model !== 'string' ||
+        !make.trim() ||
+        !model.trim()
+      ) {
+        return res.status(400).json({ error: 'Invalid make or model' });
+      }
+
+      /* 4️⃣ Safe update */
+      await db.query(
         `
         UPDATE vehicle_type_master
         SET
@@ -140,7 +177,6 @@ router.put(
           drawings_folder_url = $7,
           updated_at = NOW()
         WHERE vtype_id = $8
-        RETURNING vtype_id
         `,
         [
           make.trim(),
@@ -153,10 +189,6 @@ router.put(
           id
         ]
       );
-
-      if (result.rowCount === 0) {
-        return res.status(404).json({ error: 'Not found' });
-      }
 
       res.json({ success: true });
     } catch (err) {

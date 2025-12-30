@@ -1,40 +1,86 @@
-// config/postgres.js
 const { Pool } = require('pg');
 const logger = require('../utils/logger');
 require('dotenv').config();
 
-const isProd = process.env.NODE_ENV === 'production';
+const isTest = process.env.NODE_ENV === 'test';
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false  // ← ALWAYS allow self-signed (Aiven)
-  },
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
-});
+let pool; // 🔒 SINGLETON
 
-pool.on('connect', () => {
-  logger.info('Connected to PostgreSQL (Aiven Cloud)');
-});
+function getPool() {
+  if (!pool) {
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
 
-pool.on('error', (err) => {
-  logger.error('PostgreSQL pool error:', err.message);
-});
+      // ✅ SAFE LIMITS (Aiven + Jest friendly)
+      max: isTest ? 8 : 15,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000,
+
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10000,
+    });
+
+    pool.on('connect', () => {
+      if (!isTest) {
+        logger.info('Connected to PostgreSQL');
+      }
+    });
+
+    pool.on('error', (err) => {
+      logger.error(`PostgreSQL pool error: ${err.message}`);
+    });
+  }
+
+  return pool;
+}
+
+/* =========================
+   QUERY WRAPPER
+========================= */
+const query = async (text, params) => {
+  const p = getPool();
+  const start = Date.now();
+
+  try {
+    const res = await p.query(text, params);
+
+    if (!isTest) {
+      logger.info(
+        `Query: ${text.substring(0, 60)}... (${Date.now() - start}ms)`
+      );
+    }
+
+    return res;
+  } catch (err) {
+    logger.error(
+      `Query failed: ${text.substring(0, 60)}... → ${err.message}`
+    );
+    throw err;
+  }
+};
+
+/* =========================
+   CLIENT ACCESS (rare use)
+========================= */
+const getClient = async () => {
+  const p = getPool();
+  return p.connect();
+};
+
+/* =========================
+   SAFE SHUTDOWN
+========================= */
+const closePool = async () => {
+  if (pool) {
+    logger.info('Closing PostgreSQL pool');
+    await pool.end();
+    pool = null; // 🔥 IMPORTANT
+  }
+};
 
 module.exports = {
-  query: async (text, params) => {
-    const start = Date.now();
-    try {
-      const res = await pool.query(text, params);
-      const duration = Date.now() - start;
-      logger.info(`Query executed: ${text.substring(0, 50)}... [${duration}ms]`);
-      return res;
-    } catch (err) {
-      logger.error(`Query failed: ${text.substring(0, 50)}...`, err.message);
-      throw err;
-    }
-  },
-  getClient: () => pool.connect(),
+  query,
+  getClient,
+  closePool,
 };
