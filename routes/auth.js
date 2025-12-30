@@ -8,7 +8,9 @@ require('dotenv').config();
 
 const router = express.Router();
 
-// POST /api/auth/login
+/**
+ * POST /api/auth/login
+ */
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
 
@@ -18,10 +20,19 @@ router.post('/login', async (req, res) => {
 
   try {
     const result = await db.query(
-      `SELECT u.user_id, u.email, u.password_hash, u.name, r.role_name
-       FROM users u
-       JOIN roles r ON u.role_id = r.role_id
-       WHERE u.email = $1`,
+      `
+      SELECT
+        u.user_id,
+        u.email,
+        u.password_hash,
+        u.name,
+        r.role_name,
+        cm.customer_id
+      FROM users u
+      JOIN roles r ON u.role_id = r.role_id
+      LEFT JOIN customer_master cm ON cm.user_id = u.user_id
+      WHERE u.email = $1
+      `,
       [email]
     );
 
@@ -31,20 +42,37 @@ router.post('/login', async (req, res) => {
     }
 
     const user = result.rows[0];
+
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) {
       logger.warn(`Login failed: wrong password - ${email}`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    // 🔐 JWT now includes customer_id for tenant isolation
     const token = jwt.sign(
-      { user_id: user.user_id, email: user.email, role: user.role_name, name: user.name },
+      {
+        user_id: user.user_id,
+        email: user.email,
+        role: user.role_name,
+        name: user.name,
+        customer_id: user.customer_id || null,
+      },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
 
     logger.info(`Login success: ${user.email} (${user.role_name})`);
-    res.json({ token, user: { name: user.name, email: user.email, role: user.role_name } });
+
+    res.json({
+      token,
+      user: {
+        name: user.name,
+        email: user.email,
+        role: user.role_name,
+        customer_id: user.customer_id || null,
+      },
+    });
   } catch (err) {
     logger.error(`Login error: ${err.message}`);
     res.status(500).json({ error: 'Server error' });
