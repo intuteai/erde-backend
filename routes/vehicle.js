@@ -1,55 +1,26 @@
+// routes/vehicle.js
 const express = require('express');
 const db = require('../config/postgres');
 const authenticateToken = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
-const { generalLimiter, liveRateLimiter } = require('../middleware/rateLimiter'); // Import both
+const { generalLimiter, liveRateLimiter } = require('../middleware/rateLimiter');
 const logger = require('../utils/logger');
 
 const router = express.Router();
 
 /* ============================================================
-   IN-MEMORY LIVE CACHE (FULLY STAMPEDE-PROTECTED)
-   - Short TTL (1.5s)
-   - True in-flight deduplication (race-safe)
-   - Only caches valid/owned vehicles
+   IN-MEMORY LIVE CACHE (STAMPEDE-PROTECTED, 1.5s TTL)
 ============================================================ */
 const LIVE_CACHE_TTL_MS = 1500;
 const liveCache = new Map(); // key: `vehicle_live:${id}`
 
-const EMPTY_LIVE_RESPONSE = {
-  soc_percent: null,
-  battery_status: null,
-  stack_voltage_v: null,
-  dc_current_a: null,
-  motor_speed_rpm: null,
-  motor_temp_c: null,
-  mcu_temp_c: null,
-  total_hours: null,
-  last_trip_hrs: null,
-  total_kwh: null,
-  last_trip_kwh: null,
-  output_power_kw: null,
-  alarms_ac_hall_failure: false,
-  alarms_bus_overvoltage_fault: false,
-  alarms_busbar_undervoltage_fault: false,
-  alarms_can_offline_failure: false,
-  alarms_encoder_failure: false,
-  alarms_fan_failure: false,
-  alarms_hardware_driver_failure: false,
-  alarms_hardware_overcurrent_fault: false,
-  alarms_hardware_overvoltage_fault: false,
-  alarms_low_voltage_undervoltage_fault: false,
-  alarms_module_over_temperature_fault: false,
-  alarms_module_over_temperature_warning: false,
-  alarms_motor_over_temperature_fault: false,
-  alarms_motor_over_temperature_warning: false,
-  alarms_over_rpm_alarm_flag: false,
-  alarms_overspeed_fault: false,
-  alarms_software_overcurrent_fault: false,
-  alarms_stall_failure: false,
-  alarms_temperature_difference_failure: false,
-  alarms_total_hardware_failure: false,
-  alarms_zero_offset_fault: false,
+const cleanupLiveCache = () => {
+  const now = Date.now();
+  for (const [key, entry] of liveCache.entries()) {
+    if (!entry?.ts || now - entry.ts > LIVE_CACHE_TTL_MS) {
+      liveCache.delete(key);
+    }
+  }
 };
 
 /* ============================================================
@@ -67,11 +38,6 @@ const toNumber = (v) => {
   return Number.isFinite(n) ? n : null;
 };
 
-const clamp = (v, min, max) => {
-  if (v === null) return null;
-  return Math.min(Math.max(v, min), max);
-};
-
 const flattenAlarms = (alarms, out = {}) => {
   if (!alarms || typeof alarms !== 'object') return out;
   for (const [k, v] of Object.entries(alarms)) {
@@ -85,25 +51,12 @@ const flattenAlarms = (alarms, out = {}) => {
 };
 
 /* ============================================================
-   CACHE CLEANUP HELPER
-============================================================ */
-const cleanupLiveCache = () => {
-  const now = Date.now();
-  for (const [key, entry] of liveCache.entries()) {
-    if (!entry?.ts || now - entry.ts > LIVE_CACHE_TTL_MS) {
-      liveCache.delete(key);
-    }
-  }
-};
-
-/* ============================================================
-   GET /api/vehicles - List all accessible vehicles
-   ORDER: auth → rate limit → permission → handler
+   GET /api/vehicles — List accessible vehicles
 ============================================================ */
 router.get(
   '/',
   authenticateToken,
-  generalLimiter,                          // ← Moved here (after auth, before permission)
+  generalLimiter,
   checkPermission('vehicles', 'read'),
   async (req, res) => {
     try {
@@ -138,13 +91,12 @@ router.get(
 );
 
 /* ============================================================
-   GET /api/vehicles/:id - Vehicle summary
-   Added generalLimiter for consistency
+   GET /api/vehicles/:id — Vehicle summary + ODO
 ============================================================ */
 router.get(
   '/:id',
   authenticateToken,
-  generalLimiter,                          // ← Added rate limiting
+  generalLimiter,
   checkPermission('vehicles', 'read'),
   async (req, res) => {
     const { id } = req.params;
@@ -167,20 +119,22 @@ router.get(
         `,
         [id, isCustomer ? req.user.user_id : null]
       );
+
       if (!result.rows.length) {
         return res.status(404).json({ error: 'Vehicle not found' });
       }
+
       const live = await db.query(
-        `
-        SELECT total_running_hrs, total_kwh_consumed
-        FROM live_values
-        WHERE vehicle_master_id = $1
-        ORDER BY recorded_at DESC
-        LIMIT 1
-        `,
+        `SELECT total_running_hrs, total_kwh_consumed
+         FROM live_values
+         WHERE vehicle_master_id = $1
+         ORDER BY recorded_at DESC
+         LIMIT 1`,
         [id]
       );
+
       const l = live.rows[0] || {};
+
       res.json({
         vehicle_master_id: result.rows[0].vehicle_master_id,
         company_name: result.rows[0].company_name,
@@ -188,7 +142,7 @@ router.get(
         model: result.rows[0].model,
         vehicle_reg_no: result.rows[0].vehicle_reg_no,
         total_hours: toNumber(intervalToHours(l.total_running_hrs)),
-        total_kwh: clamp(toNumber(l.total_kwh_consumed), 0, 1e6),
+        total_kwh: toNumber(l.total_kwh_consumed),
         date_of_deployment: result.rows[0].date_of_deployment,
       });
     } catch (err) {
@@ -199,8 +153,7 @@ router.get(
 );
 
 /* ============================================================
-   GET /api/vehicles/:id/live - High-frequency live data
-   liveRateLimiter is correctly placed after auth & permission
+   GET /api/vehicles/:id/live — COMPLETE LIVE DATA
 ============================================================ */
 router.get(
   '/:id/live',
@@ -214,41 +167,41 @@ router.get(
     const isCustomer = req.user.role === 'customer';
     const cacheKey = `vehicle_live:${id}`;
     const now = Date.now();
-
     const getEntry = () => liveCache.get(cacheKey);
 
     try {
+      // Return cached data if fresh
       let entry = getEntry();
       if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
         return res.json(entry.data);
       }
 
+      // Ownership check
       let allowed = false;
       try {
         const ownership = await db.query(
-          `
-          SELECT 1
-          FROM vehicle_master vm
-          JOIN customer_master cm ON vm.customer_id = cm.customer_id
-          WHERE vm.vehicle_master_id = $1
-            AND ($2::int IS NULL OR cm.user_id = $2)
-          `,
+          `SELECT 1 FROM vehicle_master vm
+           JOIN customer_master cm ON vm.customer_id = cm.customer_id
+           WHERE vm.vehicle_master_id = $1
+             AND ($2::int IS NULL OR cm.user_id = $2)`,
           [id, isCustomer ? req.user.user_id : null]
         );
         allowed = ownership.rows.length > 0;
-      } catch (ownershipErr) {
-        logger.warn(`Ownership check failed for vehicle ${id}: ${ownershipErr.message}`);
+      } catch (err) {
+        logger.warn(`Ownership check failed for vehicle ${id}: ${err.message}`);
       }
 
       if (!allowed) {
         return res.json({});
       }
 
+      // Check cache again after ownership
       entry = getEntry();
       if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
         return res.json(entry.data);
       }
 
+      // In-flight deduplication
       if (entry?.inflight) {
         const data = await entry.inflight;
         return res.json(data);
@@ -257,75 +210,93 @@ router.get(
       const inflightPromise = (async () => {
         try {
           const result = await db.query(
-            `
-            SELECT *
-            FROM live_values
-            WHERE vehicle_master_id = $1
-            ORDER BY recorded_at DESC
-            LIMIT 1
-            `,
+            `SELECT * FROM live_values
+             WHERE vehicle_master_id = $1
+             ORDER BY recorded_at DESC
+             LIMIT 1`,
             [id]
           );
 
-          let response = { ...EMPTY_LIVE_RESPONSE };
-
-          if (result.rows.length > 0) {
-            const r = result.rows[0];
-
-            response = {
-              soc_percent: clamp(toNumber(r.soc_percent), 0, 100),
-              battery_status: r.battery_status ?? null,
-              stack_voltage_v: clamp(toNumber(r.stack_voltage_v), 0, 1000),
-              dc_current_a: clamp(toNumber(r.battery_current_a), -2000, 2000),
-              motor_speed_rpm: toNumber(r.motor_speed_rpm),
-              motor_temp_c: clamp(toNumber(r.motor_temp_c), -50, 200),
-              mcu_temp_c: clamp(toNumber(r.mcu_temp_c), -50, 200),
-              total_hours: toNumber(intervalToHours(r.total_running_hrs)),
-              last_trip_hrs: toNumber(intervalToHours(r.last_trip_hrs)),
-              total_kwh: clamp(toNumber(r.total_kwh_consumed), 0, 1e6),
-              last_trip_kwh: clamp(toNumber(r.last_trip_kwh), 0, 1e5),
-              output_power_kw: null,
-            };
-
-            if (response.stack_voltage_v != null && response.dc_current_a != null) {
-              response.output_power_kw = clamp(
-                (response.stack_voltage_v * response.dc_current_a) / 1000,
-                -1000,
-                1000
-              );
-            }
-
-            Object.assign(response, flattenAlarms(r.alarms));
+          if (!result.rows.length) {
+            return {};
           }
 
-          liveCache.set(cacheKey, { ts: Date.now(), data: response });
+          const r = result.rows[0];
+
+          const response = {
+            // Battery Core
+            soc_percent: toNumber(r.soc_percent),
+            battery_status: r.battery_status ?? null,
+            stack_voltage_v: toNumber(r.stack_voltage_v),
+            dc_current_a: toNumber(r.battery_current_a),
+            charging_current_a: toNumber(r.charger_current_demand_a),
+
+            // Module Sensors (full arrays preserved)
+            temp_sensors: (r.temp_sensors || []).map(toNumber),
+            cell_voltages: (r.cell_voltages || []).map(toNumber),
+
+            // Motor & MCU
+            motor_torque_nm: toNumber(r.motor_torque_value),
+            motor_torque_limit: toNumber(r.motor_torque_limit),
+            motor_operation_mode: r.motor_operation_mode ?? null,
+            motor_speed_rpm: toNumber(r.motor_speed_rpm),
+            motor_rotation_dir: r.motor_rotation_dir ?? null,
+            ac_current_a: toNumber(r.motor_ac_current_a),
+            motor_ac_voltage_v: toNumber(r.motor_ac_voltage_v),
+            mcu_enable_state: r.mcu_enable_state ?? null,
+            motor_temp_c: toNumber(r.motor_temp_c),
+            mcu_temp_c: toNumber(r.mcu_temp_c),
+
+            // Peripherals
+            radiator_temp_c: toNumber(r.radiator_temp_c),
+
+            // ODO & Energy
+            total_hours: intervalToHours(r.total_running_hrs),
+            last_trip_hrs: intervalToHours(r.last_trip_hrs),
+            total_kwh: toNumber(r.total_kwh_consumed),
+            last_trip_kwh: toNumber(r.last_trip_kwh),
+
+            // DC-DC Converter (ALL fields included)
+            dcdc_input_voltage_v: toNumber(r.dcdc_input_voltage_v),
+            dcdc_input_current_a: toNumber(r.dcdc_input_current_a),
+            dcdc_output_voltage_v: toNumber(r.dcdc_output_voltage_v),
+            dcdc_output_current_a: toNumber(r.dcdc_output_current_a),
+            dcdc_pri_a_mosfet_temp_c: toNumber(r.dcdc_pri_a_mosfet_temp_c),
+            dcdc_pri_c_mosfet_temp_c: toNumber(r.dcdc_pri_c_mosfet_temp_c),
+            dcdc_sec_ls_mosfet_temp_c: toNumber(r.dcdc_sec_ls_mosfet_temp_c),
+            dcdc_sec_hs_mosfet_temp_c: toNumber(r.dcdc_sec_hs_mosfet_temp_c),
+            dcdc_occurrence_count: toNumber(r.dcdc_occurence_count) ?? null, // spelling fixed for frontend
+
+            // Calculated output power
+            output_power_kw: null,
+          };
+
+          // Calculate output power safely
+          if (response.stack_voltage_v != null && response.dc_current_a != null) {
+            response.output_power_kw = (response.stack_voltage_v * response.dc_current_a) / 1000;
+          }
+
+          // Flatten alarms from JSONB
+          Object.assign(response, flattenAlarms(r.alarms));
+
           return response;
-        } catch (fetchErr) {
-          logger.error(`Live data fetch failed for vehicle ${id}: ${fetchErr.message}`);
-          const fallback = { ...EMPTY_LIVE_RESPONSE };
-          liveCache.set(cacheKey, { ts: Date.now(), data: fallback });
-          return fallback;
-        } finally {
-          const current = getEntry();
-          if (current?.inflight === inflightPromise) {
-            const { data } = current;
-            liveCache.set(cacheKey, { ts: current.ts || now, data });
-          }
+        } catch (err) {
+          logger.error(`Live data fetch error for vehicle ${id}: ${err.message}`);
+          return {};
         }
       })();
 
+      // Store inflight promise
       liveCache.set(cacheKey, { ts: now, inflight: inflightPromise });
 
       const data = await inflightPromise;
+
+      // Cache final result
+      liveCache.set(cacheKey, { ts: Date.now(), data });
+
       res.json(data);
-    } catch (outerErr) {
-      logger.error(`Unexpected error in /vehicles/:id/live: ${outerErr.message}`);
-
-      const entry = getEntry();
-      if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
-        return res.json(entry.data);
-      }
-
+    } catch (err) {
+      logger.error(`Unexpected /live error for vehicle ${id}: ${err.message}`);
       res.json({});
     }
   }
