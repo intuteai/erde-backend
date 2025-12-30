@@ -2,6 +2,14 @@
 const db = require('../config/postgres');
 const logger = require('../utils/logger');
 
+// 🔴 NEW: Socket.IO (safe optional import)
+let io;
+try {
+  ({ io } = require('../server'));
+} catch (e) {
+  io = null; // allows service to work even if sockets are disabled
+}
+
 const toNum = (v) =>
   v === null || v === undefined || Number.isNaN(Number(v)) ? null : Number(v);
 
@@ -90,7 +98,7 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.mcu_temp_c),
         toNum(live.radiator_temp_c),
 
-        // ================= DCDC (NEW) =================
+        // ================= DCDC =================
         toNum(live.dcdc_pri_a_mosfet_temp_c),
         toNum(live.dcdc_sec_ls_mosfet_temp_c),
         toNum(live.dcdc_sec_hs_mosfet_temp_c),
@@ -111,6 +119,7 @@ const insertTelemetryItems = async (items = []) => {
         live.alarms ? JSON.stringify(live.alarms) : JSON.stringify({})
       ];
 
+      // 🔹 DB INSERT (UNCHANGED)
       await client.query(
         `
         INSERT INTO live_values (
@@ -129,7 +138,6 @@ const insertTelemetryItems = async (items = []) => {
           motor_ac_current_a, motor_ac_voltage_v, dc_side_voltage_v,
           motor_temp_c, mcu_temp_c, radiator_temp_c,
 
-          -- DCDC
           dcdc_pri_a_mosfet_temp_c,
           dcdc_sec_ls_mosfet_temp_c,
           dcdc_sec_hs_mosfet_temp_c,
@@ -160,7 +168,6 @@ const insertTelemetryItems = async (items = []) => {
           $23, $24, $25,
           $26, $27, $28,
 
-          -- DCDC
           $29, $30, $31, $32,
           $33, $34, $35, $36, $37,
 
@@ -172,6 +179,15 @@ const insertTelemetryItems = async (items = []) => {
         `,
         values
       );
+
+      // 🟢 NEW: LIVE PUSH (non-blocking, safe)
+      if (io) {
+        io.to(`vehicle:${vehicleIdOrMasterId}`).emit('live_update', {
+          vehicleId: vehicleIdOrMasterId,
+          recorded_at: ts,
+          ...live,
+        });
+      }
 
       inserted++;
     }
