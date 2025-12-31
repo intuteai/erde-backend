@@ -6,7 +6,100 @@ const checkPermission = require('../middleware/checkPermission');
 const logger = require('../utils/logger');
 
 /* ============================================================
-   1. GET /api/vehicle-master  (Admin → all vehicles)
+   HELPER: Determine vehicle status based on last seen timestamp
+============================================================ */
+const getVehicleStatus = (lastSeen) => {
+  if (!lastSeen) return 'offline';
+
+  const diffMs = Date.now() - new Date(lastSeen).getTime();
+  const diffMin = diffMs / 60000;
+
+  if (diffMin <= 2) return 'online';
+  if (diffMin <= 10) return 'idle';
+  return 'offline';
+};
+
+/* ============================================================
+   1. GET /api/vehicle-master/admin-summary
+   👉 Ordered by vehicle_master_id ASC → ID 1 on top, matches DB natural order
+============================================================ */
+router.get(
+  '/admin-summary',
+  authenticateToken,
+  checkPermission('vehicle_master', 'read'),
+  async (req, res) => {
+    try {
+      const result = await db.query(`
+        SELECT
+          vm.vehicle_master_id,
+          vm.vehicle_reg_no,
+          cm.company_name,
+          vt.make AS vehicle_make,
+          vt.model AS vehicle_model,
+          vt.capacity_tonne,
+          lv.recorded_at AS last_seen,
+
+          -- Total running hours in decimal (e.g., 137.45)
+          CASE 
+            WHEN lv.total_running_hrs IS NOT NULL 
+            THEN ROUND(EXTRACT(EPOCH FROM lv.total_running_hrs) / 3600.0, 2)
+            ELSE NULL 
+          END AS total_running_hours,
+
+          -- Total kWh consumed, rounded safely
+          ROUND(lv.total_kwh_consumed, 2) AS total_kwh_consumed,
+
+          -- Avg kWh/Hr: ONLY if vehicle has run for at least 1 hour
+          CASE
+            WHEN lv.total_running_hrs IS NOT NULL
+             AND EXTRACT(EPOCH FROM lv.total_running_hrs) >= 3600  -- ≥ 1 hour in seconds
+            THEN ROUND(
+              lv.total_kwh_consumed /
+              (EXTRACT(EPOCH FROM lv.total_running_hrs) / 3600),
+              2
+            )
+            ELSE NULL
+          END AS avg_kwh_per_hour
+
+        FROM vehicle_master vm
+        JOIN customer_master cm ON vm.customer_id = cm.customer_id
+        JOIN vehicle_type_master vt ON vm.vtype_id = vt.vtype_id
+        LEFT JOIN LATERAL (
+          SELECT
+            recorded_at,
+            total_running_hrs,
+            total_kwh_consumed
+          FROM live_values
+          WHERE vehicle_master_id = vm.vehicle_master_id
+          ORDER BY recorded_at DESC
+          LIMIT 1
+        ) lv ON true
+        ORDER BY vm.vehicle_master_id ASC  -- ← Changed to ASC: ID 1 first, then 2, etc.
+      `);
+
+      const data = result.rows.map(row => ({
+        vehicle_master_id: row.vehicle_master_id,
+        vehicle_no: row.vehicle_reg_no || '-',
+        customer: row.company_name || '-',
+        vehicle_type: `${row.vehicle_make || ''} ${row.vehicle_model || ''}`.trim() || '-',
+        capacity: row.capacity_tonne ?? '-',
+        total_hours: row.total_running_hours,
+        total_kwh: row.total_kwh_consumed,
+        avg_kwh: row.avg_kwh_per_hour,
+        status: getVehicleStatus(row.last_seen),
+        last_seen: row.last_seen
+      }));
+
+      res.json(data);
+    } catch (err) {
+      logger.error('GET /vehicle-master/admin-summary error:', err.message);
+      res.status(500).json({ error: 'Server error' });
+    }
+  }
+);
+
+/* ============================================================
+   2. GET /api/vehicle-master (Admin → all detailed vehicles)
 ============================================================ */
 router.get(
   '/',
@@ -19,7 +112,6 @@ router.get(
           vm.vehicle_master_id,
           vm.vehicle_unique_id,
           vm.vehicle_reg_no,
-          vm.vehicle_type,
           vm.customer_id,
           vm.vtype_id,
           vm.vcu_id,
@@ -27,38 +119,32 @@ router.get(
 
           vm.vcu_make_model,
           vm.hmi_make_model,
+          vm.motor_unique_id,
           vm.motor_make_model,
+          vm.controller_unique_id,
           vm.controller_make_model,
+          vm.battery_unique_id,
           vm.battery_make_model,
           vm.dc_dc_make_model,
           vm.btms_make_model,
 
           vm.hyd_cooling_yesno,
           vm.motor_controller_details,
-
           vm.compressor_yesno,
           vm.compressor_details,
           vm.motor_cooling_yesno,
           vm.motor_cooling_details,
 
           vm.date_of_deployment,
-          vm.created_at,
-          vm.updated_at,
 
           vt.make  AS vehicle_make,
           vt.model AS vehicle_model,
-          cm.company_name,
+          cm.company_name
 
-          v.vcu_make,
-          v.vcu_model,
-          h.hmi_make,
-          h.hmi_model
         FROM vehicle_master vm
         JOIN vehicle_type_master vt ON vm.vtype_id = vt.vtype_id
         JOIN customer_master cm ON vm.customer_id = cm.customer_id
-        LEFT JOIN vcu_master v ON vm.vcu_id = v.vcu_id
-        LEFT JOIN hmi_master h ON vm.hmi_id = h.hmi_id
-        ORDER BY vm.vehicle_master_id
+        ORDER BY vm.vehicle_master_id DESC
       `);
 
       res.json(result.rows);
@@ -70,7 +156,7 @@ router.get(
 );
 
 /* ============================================================
-   2. GET /api/vehicle-master/my  (Customer vehicles)
+   3. GET /api/vehicle-master/my (Customer's own vehicles)
 ============================================================ */
 router.get(
   '/my',
@@ -94,26 +180,21 @@ router.get(
           vm.vehicle_master_id,
           vm.vehicle_unique_id,
           vm.vehicle_reg_no,
-          vm.vehicle_type,
           vm.vcu_id,
           vm.hmi_id,
+          vm.motor_unique_id,
+          vm.controller_unique_id,
+          vm.battery_unique_id,
           vm.date_of_deployment,
 
           vt.make AS vehicle_make,
           vt.model AS vehicle_model,
-          cm.company_name,
-
-          v.vcu_make,
-          v.vcu_model,
-          h.hmi_make,
-          h.hmi_model
+          cm.company_name
         FROM vehicle_master vm
         JOIN vehicle_type_master vt ON vm.vtype_id = vt.vtype_id
         JOIN customer_master cm ON vm.customer_id = cm.customer_id
-        LEFT JOIN vcu_master v ON vm.vcu_id = v.vcu_id
-        LEFT JOIN hmi_master h ON vm.hmi_id = h.hmi_id
         WHERE vm.customer_id = $1
-        ORDER BY vm.vehicle_master_id
+        ORDER BY vm.vehicle_master_id DESC
       `, [customerId]);
 
       res.json(result.rows);
@@ -125,7 +206,7 @@ router.get(
 );
 
 /* ============================================================
-   3. POST /api/vehicle-master  (Admin)
+   4. POST /api/vehicle-master
 ============================================================ */
 router.post(
   '/',
@@ -139,19 +220,20 @@ router.post(
       vcu_id,
       hmi_id,
       vehicle_reg_no,
-      vehicle_type,
 
       vcu_make_model,
       hmi_make_model,
+      motor_unique_id,
       motor_make_model,
+      controller_unique_id,
       controller_make_model,
+      battery_unique_id,
       battery_make_model,
       dc_dc_make_model,
       btms_make_model,
 
       hyd_cooling_yesno,
       motor_controller_details,
-
       compressor_yesno,
       compressor_details,
       motor_cooling_yesno,
@@ -161,72 +243,44 @@ router.post(
     } = req.body;
 
     if (!vehicle_unique_id || !customer_id || !vtype_id) {
-      return res.status(400).json({ error: 'Missing required fields' });
+      return res.status(400).json({ error: 'Missing required fields: unique ID, customer, or vehicle type' });
     }
 
     try {
       const result = await db.query(`
         INSERT INTO vehicle_master (
-          vehicle_unique_id,
-          customer_id,
-          vtype_id,
-          vcu_id,
-          hmi_id,
-          vehicle_reg_no,
-          vehicle_type,
-
-          vcu_make_model,
-          hmi_make_model,
-          motor_make_model,
-          controller_make_model,
-          battery_make_model,
-          dc_dc_make_model,
-          btms_make_model,
-
-          hyd_cooling_yesno,
-          motor_controller_details,
-
-          compressor_yesno,
-          compressor_details,
-          motor_cooling_yesno,
-          motor_cooling_details,
-
+          vehicle_unique_id, customer_id, vtype_id,
+          vcu_id, hmi_id, vehicle_reg_no,
+          vcu_make_model, hmi_make_model,
+          motor_unique_id, motor_make_model,
+          controller_unique_id, controller_make_model,
+          battery_unique_id, battery_make_model,
+          dc_dc_make_model, btms_make_model,
+          hyd_cooling_yesno, motor_controller_details,
+          compressor_yesno, compressor_details,
+          motor_cooling_yesno, motor_cooling_details,
           date_of_deployment,
           created_by
-        )
-        VALUES (
-          $1,$2,$3,$4,$5,$6,$7,
-          $8,$9,$10,$11,$12,$13,$14,
-          $15,$16,
-          $17,$18,$19,$20,
-          $21,$22
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+          $11, $12, $13, $14, $15, $16, $17, $18,
+          $19, $20, $21, $22, $23, $24
         )
         RETURNING vehicle_master_id
       `, [
-        vehicle_unique_id,
-        customer_id,
-        vtype_id,
-        vcu_id || null,
-        hmi_id || null,
-        vehicle_reg_no || null,
-        vehicle_type || null,
-
-        vcu_make_model || null,
-        hmi_make_model || null,
-        motor_make_model || null,
-        controller_make_model || null,
-        battery_make_model || null,
-        dc_dc_make_model || null,
-        btms_make_model || null,
-
-        hyd_cooling_yesno ?? null,
+        vehicle_unique_id, customer_id, vtype_id,
+        vcu_id || null, hmi_id || null, vehicle_reg_no || null,
+        vcu_make_model || null, hmi_make_model || null,
+        motor_unique_id || null, motor_make_model || null,
+        controller_unique_id || null, controller_make_model || null,
+        battery_unique_id || null, battery_make_model || null,
+        dc_dc_make_model || null, btms_make_model || null,
+        hyd_cooling_yesno ?? false,
         motor_controller_details || null,
-
-        compressor_yesno ?? null,
+        compressor_yesno ?? false,
         compressor_details || null,
-        motor_cooling_yesno ?? null,
+        motor_cooling_yesno ?? false,
         motor_cooling_details || null,
-
         date_of_deployment || null,
         req.user.user_id
       ]);
@@ -234,13 +288,16 @@ router.post(
       res.status(201).json({ id: result.rows[0].vehicle_master_id });
     } catch (err) {
       logger.error('POST /vehicle-master error:', err.message);
+      if (err.code === '23505') {
+        return res.status(409).json({ error: 'Vehicle Unique ID already exists' });
+      }
       res.status(500).json({ error: 'Failed to create vehicle' });
     }
   }
 );
 
 /* ============================================================
-   4. PUT /api/vehicle-master/:id
+   5. PUT /api/vehicle-master/:id
 ============================================================ */
 router.put(
   '/:id',
@@ -248,38 +305,32 @@ router.put(
   checkPermission('vehicle_master', 'write'),
   async (req, res) => {
     const allowed = [
-      'vehicle_reg_no',
-      'vehicle_type',
-      'vcu_id',
-      'hmi_id',
-      'motor_make_model',
-      'controller_make_model',
-      'battery_make_model',
-      'dc_dc_make_model',
-      'btms_make_model',
-      'hyd_cooling_yesno',
-      'motor_controller_details',
-      'compressor_yesno',
-      'compressor_details',
-      'motor_cooling_yesno',
-      'motor_cooling_details',
+      'vehicle_reg_no', 'customer_id', 'vtype_id', 'vcu_id', 'hmi_id',
+      'vcu_make_model', 'hmi_make_model',
+      'motor_unique_id', 'motor_make_model',
+      'controller_unique_id', 'controller_make_model',
+      'battery_unique_id', 'battery_make_model',
+      'dc_dc_make_model', 'btms_make_model',
+      'hyd_cooling_yesno', 'motor_controller_details',
+      'compressor_yesno', 'compressor_details',
+      'motor_cooling_yesno', 'motor_cooling_details',
       'date_of_deployment'
     ];
 
     const updates = [];
     const values = [];
-    let i = 1;
+    let index = 1;
 
-    for (const key of allowed) {
-      if (req.body[key] !== undefined) {
-        updates.push(`${key} = $${i}`);
-        values.push(req.body[key]);
-        i++;
+    for (const field of allowed) {
+      if (req.body[field] !== undefined) {
+        updates.push(`${field} = $${index}`);
+        values.push(req.body[field]);
+        index++;
       }
     }
 
-    if (!updates.length) {
-      return res.status(400).json({ error: 'No valid fields to update' });
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No valid fields provided for update' });
     }
 
     values.push(req.params.id);
@@ -288,23 +339,27 @@ router.put(
       const result = await db.query(`
         UPDATE vehicle_master
         SET ${updates.join(', ')}, updated_at = NOW()
-        WHERE vehicle_master_id = $${i}
+        WHERE vehicle_master_id = $${index}
+        RETURNING vehicle_master_id
       `, values);
 
-      if (!result.rowCount) {
+      if (result.rowCount === 0) {
         return res.status(404).json({ error: 'Vehicle not found' });
       }
 
       res.json({ success: true });
     } catch (err) {
-      logger.error('PUT /vehicle-master error:', err.message);
+      logger.error('PUT /vehicle-master/:id error:', err.message);
+      if (err.code === '23505') {
+        return res.status(409).json({ error: 'Unique constraint violated (e.g., duplicate Unique ID)' });
+      }
       res.status(500).json({ error: 'Update failed' });
     }
   }
 );
 
 /* ============================================================
-   5. DELETE /api/vehicle-master/:id
+   6. DELETE /api/vehicle-master/:id
 ============================================================ */
 router.delete(
   '/:id',
@@ -317,22 +372,22 @@ router.delete(
         [req.params.id]
       );
 
-      if (liveCheck.rows.length) {
-        return res.status(400).json({ error: 'Cannot delete: vehicle has live data' });
+      if (liveCheck.rows.length > 0) {
+        return res.status(400).json({ error: 'Cannot delete: vehicle has live/telemetry data' });
       }
 
       const result = await db.query(
-        `DELETE FROM vehicle_master WHERE vehicle_master_id = $1`,
+        `DELETE FROM vehicle_master WHERE vehicle_master_id = $1 RETURNING vehicle_master_id`,
         [req.params.id]
       );
 
-      if (!result.rowCount) {
+      if (result.rowCount === 0) {
         return res.status(404).json({ error: 'Vehicle not found' });
       }
 
       res.json({ success: true });
     } catch (err) {
-      logger.error('DELETE /vehicle-master error:', err.message);
+      logger.error('DELETE /vehicle-master/:id error:', err.message);
       res.status(500).json({ error: 'Delete failed' });
     }
   }

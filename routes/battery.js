@@ -1,4 +1,3 @@
-// routes/battery.js
 const express = require('express');
 const db = require('../config/postgres');
 const authenticateToken = require('../middleware/auth');
@@ -7,14 +6,49 @@ const logger = require('../utils/logger');
 
 const router = express.Router();
 
-// GET /api/battery/analytics/:id?days=30
+/**
+ * GET /api/battery/analytics/:id
+ *
+ * Supported modes (priority order):
+ * 1) ?date=YYYY-MM-DD               → single day
+ * 2) ?from=YYYY-MM-DD&to=YYYY-MM-DD → date range
+ * 3) ?days=30 (default)             → last N days
+ *
+ * NOTES:
+ * - ORDER BY day DESC is preserved
+ * - data[0] is always the latest day
+ * - daily values are returned as-is (no suppression)
+ */
 router.get(
   '/analytics/:id',
   authenticateToken,
   checkPermission('analytics', 'read'),
   async (req, res) => {
     const { id } = req.params;
-    const days = Number.parseInt(req.query.days, 10) || 30;
+    const { date, from, to, days } = req.query;
+
+    let whereClause = `vehicle_master_id = $1`;
+    const values = [id];
+    let idx = 2;
+
+    /* ===== SINGLE DATE ===== */
+    if (date) {
+      whereClause += ` AND day = $${idx}`;
+      values.push(date);
+    }
+
+    /* ===== DATE RANGE ===== */
+    else if (from && to) {
+      whereClause += ` AND day BETWEEN $${idx} AND $${idx + 1}`;
+      values.push(from, to);
+    }
+
+    /* ===== DEFAULT: LAST N DAYS ===== */
+    else {
+      const safeDays = Number.isInteger(Number(days)) ? Number(days) : 30;
+      whereClause += ` AND day >= CURRENT_DATE - ($${idx} * INTERVAL '1 day')`;
+      values.push(safeDays);
+    }
 
     try {
       const result = await db.query(
@@ -22,32 +56,32 @@ router.get(
         SELECT
           day,
 
-          -- cumulative metrics
+          /* ===== DAILY ENERGY & ELECTRICAL ===== */
           total_kwh_consumed,
           max_power_delivered_kw,
           max_op_dc_current_a,
 
-          -- daily thermal
+          /* ===== DAILY THERMAL ===== */
           max_cell_temp_c,
           avg_cell_temp_c,
 
-          -- last trip metrics
+          /* ===== LAST TRIP METRICS ===== */
           max_power_last_trip,
           kwh_last_trip,
           max_cell_temp_last_trip,
           avg_cell_temp_last_trip
 
         FROM battery_analytics_daily
-        WHERE vehicle_master_id = $1
-          AND day >= CURRENT_DATE - ($2 * INTERVAL '1 day')
+        WHERE ${whereClause}
         ORDER BY day DESC
         `,
-        [id, days]
+        values
       );
 
       res.json(result.rows);
     } catch (err) {
-      logger.error(`GET /battery/analytics/${id} error: ${err.message}`, {
+      logger.error(`GET /battery/analytics/${id} failed`, {
+        message: err.message,
         stack: err.stack,
       });
       res.status(500).json({ error: 'Server error' });

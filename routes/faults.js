@@ -19,14 +19,10 @@ const normalizeDtcCode = (key) =>
 /**
  * POST /api/faults/:id
  *
- * Expected body (same shape as telemetry):
+ * Expected body:
  * {
  *   "alarms": {
- *     "faults": {
- *       "has_any_motor_fault": true,
- *       "fault_code_nonzero": false,
- *       "encoder_failure": true
- *     }
+ *     "faults": { ...boolean flags... }
  *   }
  * }
  */
@@ -50,34 +46,33 @@ router.post(
       await client.query('BEGIN');
 
       for (const [key, value] of Object.entries(faults)) {
-        // Only boolean alarms generate DTCs
         if (typeof value !== 'boolean') continue;
 
         const code = normalizeDtcCode(key);
         const description = `Alarm flag: ${key}`;
 
         if (value === true) {
-          // Insert ACTIVE fault if not already active
+          // Activate fault if not already active
           await client.query(
             `
-            INSERT INTO dtc_events (vehicle_master_id, code, description)
-            SELECT $1, $2, $3
+            INSERT INTO dtc_events (vehicle_master_id, code, description, status)
+            SELECT $1, $2, $3, 'ACTIVE'
             WHERE NOT EXISTS (
-              SELECT 1
-              FROM dtc_events
+              SELECT 1 FROM dtc_events
               WHERE vehicle_master_id = $1
                 AND code = $2
                 AND status = 'ACTIVE'
             )
+            ON CONFLICT DO NOTHING
             `,
             [vehicleId, code, description]
           );
         } else {
-          // Clear ACTIVE fault if present
+          // Clear active fault
           await client.query(
             `
             UPDATE dtc_events
-            SET status = 'CLEARED'
+            SET status = 'CLEARED', cleared_at = NOW()
             WHERE vehicle_master_id = $1
               AND code = $2
               AND status = 'ACTIVE'
@@ -101,7 +96,11 @@ router.post(
 
 /* ========================= READ DTC EVENTS ========================= */
 /**
- * GET /api/faults/:id?days=30
+ * GET /api/faults/:id
+ *
+ * Supports:
+ *   ?days=30     → last 30 days (default)
+ *   ?date=2025-12-25 → faults from that exact day (00:00 to 23:59:59)
  */
 router.get(
   '/:id',
@@ -109,25 +108,49 @@ router.get(
   checkPermission('faults', 'read'),
   async (req, res) => {
     const { id } = req.params;
-    const days = Number.parseInt(req.query.days, 10) || 30;
+    const { days, date } = req.query;
 
     try {
-      const result = await db.query(
-        `
-        SELECT
-          dtc_id,
-          code,
-          description,
-          status,
-          recorded_at
-        FROM dtc_events
-        WHERE vehicle_master_id = $1
-          AND recorded_at >= now() - ($2 || ' days')::interval
-        ORDER BY recorded_at DESC
-        `,
-        [id, days]
-      );
+      let query;
+      let values;
 
+      if (date) {
+        // Exact day filter: from 00:00 to 23:59:59 of given date
+        const targetDate = date; // Expected format: YYYY-MM-DD
+
+        query = `
+          SELECT
+            dtc_id,
+            code,
+            description,
+            status,
+            recorded_at
+          FROM dtc_events
+          WHERE vehicle_master_id = $1
+            AND recorded_at::date = $2::date
+          ORDER BY recorded_at DESC
+        `;
+        values = [id, targetDate];
+      } else {
+        // Default: last N days
+        const dayCount = Math.max(1, Number.parseInt(days, 10) || 30);
+
+        query = `
+          SELECT
+            dtc_id,
+            code,
+            description,
+            status,
+            recorded_at
+          FROM dtc_events
+          WHERE vehicle_master_id = $1
+            AND recorded_at >= NOW() - ($2 || ' days')::interval
+          ORDER BY recorded_at DESC
+        `;
+        values = [id, dayCount];
+      }
+
+      const result = await db.query(query, values);
       res.json(result.rows);
     } catch (err) {
       logger.error(`GET /faults/${id} error: ${err.message}`);
