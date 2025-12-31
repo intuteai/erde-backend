@@ -7,9 +7,9 @@ const logger = require('../utils/logger');
 const router = express.Router();
 const MODULE = 'vcu';
 
-/* =========================
+/* ============================================================
    GET ALL VCUs
-========================= */
+============================================================ */
 router.get(
   '/',
   authenticateToken,
@@ -21,11 +21,14 @@ router.get(
           vcu_id,
           vcu_make,
           vcu_model,
+          serial_number,
           vcu_specs,
-          created_at
+          created_at,
+          updated_at
         FROM vcu_master
-        ORDER BY vcu_make, vcu_model
+        ORDER BY vcu_make, vcu_model, serial_number
       `);
+
       res.json(result.rows);
     } catch (err) {
       logger.error(`GET /vcu error: ${err.message}`);
@@ -34,9 +37,9 @@ router.get(
   }
 );
 
-/* =========================
+/* ============================================================
    GET VCU BY ID
-========================= */
+============================================================ */
 router.get(
   '/:id',
   authenticateToken,
@@ -47,9 +50,11 @@ router.get(
         `SELECT * FROM vcu_master WHERE vcu_id = $1`,
         [req.params.id]
       );
+
       if (!result.rows.length) {
         return res.status(404).json({ error: 'VCU not found' });
       }
+
       res.json(result.rows[0]);
     } catch (err) {
       logger.error(`GET /vcu/${req.params.id} error: ${err.message}`);
@@ -58,56 +63,76 @@ router.get(
   }
 );
 
-/* =========================
-   CREATE VCU
-========================= */
+/* ============================================================
+   CREATE VCU (ONE ROW = ONE SERIAL)
+============================================================ */
 router.post(
   '/',
   authenticateToken,
   checkPermission(MODULE, 'write'),
   async (req, res) => {
-    const { vcu_make, vcu_model, vcu_specs } = req.body;
+    const { vcu_make, vcu_model, serial_number, vcu_specs } = req.body;
 
-    if (!vcu_make || !vcu_model) {
-      return res.status(400).json({ error: 'vcu_make and vcu_model required' });
+    if (!vcu_make || !vcu_model || !serial_number) {
+      return res.status(400).json({
+        error: 'vcu_make, vcu_model and serial_number are required',
+      });
     }
 
     try {
       const result = await db.query(
         `
-        INSERT INTO vcu_master
-          (vcu_make, vcu_model, vcu_specs, created_by)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO vcu_master (
+          vcu_make,
+          vcu_model,
+          serial_number,
+          vcu_specs,
+          created_by
+        )
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING vcu_id
         `,
-        [vcu_make, vcu_model, vcu_specs || null, req.user.user_id]
+        [
+          vcu_make.trim(),
+          vcu_model.trim(),
+          serial_number.trim(),
+          vcu_specs || null,
+          req.user.user_id,
+        ]
       );
 
       res.status(201).json({ vcu_id: result.rows[0].vcu_id });
     } catch (err) {
       logger.error(`POST /vcu error: ${err.message}`);
-      res.status(400).json({ error: 'VCU already exists' });
+
+      if (err.code === '23505') {
+        return res.status(409).json({
+          error: 'Serial number already exists',
+        });
+      }
+
+      res.status(500).json({ error: 'Failed to create VCU' });
     }
   }
 );
 
-/* =========================
-   UPDATE VCU
-========================= */
+/* ============================================================
+   UPDATE VCU (SERIAL EDITABLE BUT UNIQUE)
+============================================================ */
 router.put(
   '/:id',
   authenticateToken,
   checkPermission(MODULE, 'write'),
   async (req, res) => {
-    const allowed = ['vcu_make', 'vcu_model', 'vcu_specs'];
+    const allowed = ['vcu_make', 'vcu_model', 'serial_number', 'vcu_specs'];
     const updates = [];
     const values = [];
     let i = 1;
 
-    for (const key of allowed) {
-      if (req.body[key] !== undefined) {
-        updates.push(`${key} = $${i}`);
-        values.push(req.body[key]);
+    for (const field of allowed) {
+      if (req.body[field] !== undefined) {
+        updates.push(`${field} = $${i}`);
+        values.push(req.body[field]?.trim?.() ?? req.body[field]);
         i++;
       }
     }
@@ -122,8 +147,10 @@ router.put(
       const result = await db.query(
         `
         UPDATE vcu_master
-        SET ${updates.join(', ')}, updated_at = NOW()
+        SET ${updates.join(', ')},
+            updated_at = NOW()
         WHERE vcu_id = $${i}
+        RETURNING vcu_id
         `,
         values
       );
@@ -135,28 +162,47 @@ router.put(
       res.json({ success: true });
     } catch (err) {
       logger.error(`PUT /vcu/${req.params.id} error: ${err.message}`);
-      res.status(500).json({ error: 'Server error' });
+
+      if (err.code === '23505') {
+        return res.status(409).json({
+          error: 'Serial number already exists',
+        });
+      }
+
+      res.status(500).json({ error: 'Update failed' });
     }
   }
 );
 
-/* =========================
+/* ============================================================
    DELETE VCU
-========================= */
+============================================================ */
 router.delete(
   '/:id',
   authenticateToken,
   checkPermission(MODULE, 'delete'),
   async (req, res) => {
     try {
-      await db.query(
+      const result = await db.query(
         `DELETE FROM vcu_master WHERE vcu_id = $1`,
         [req.params.id]
       );
+
+      if (!result.rowCount) {
+        return res.status(404).json({ error: 'VCU not found' });
+      }
+
       res.json({ success: true });
     } catch (err) {
       logger.error(`DELETE /vcu/${req.params.id} error: ${err.message}`);
-      res.status(400).json({ error: 'VCU in use by vehicle_master' });
+
+      if (err.code === '23503') {
+        return res.status(400).json({
+          error: 'Cannot delete: VCU is used in vehicle_master',
+        });
+      }
+
+      res.status(500).json({ error: 'Delete failed' });
     }
   }
 );

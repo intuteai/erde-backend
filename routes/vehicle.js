@@ -243,7 +243,10 @@ router.get(
             motor_rotation_dir: r.motor_rotation_dir ?? null,
             ac_current_a: toNumber(r.motor_ac_current_a),
             motor_ac_voltage_v: toNumber(r.motor_ac_voltage_v),
-            mcu_enable_state: r.mcu_enable_state ?? null,
+            // FIXED: Convert string "Enabled"/"Disabled" to boolean
+            mcu_enable_state: r.mcu_enable_state
+              ? r.mcu_enable_state.toLowerCase().trim() === 'enabled'
+              : null,
             motor_temp_c: toNumber(r.motor_temp_c),
             mcu_temp_c: toNumber(r.mcu_temp_c),
 
@@ -265,7 +268,7 @@ router.get(
             dcdc_pri_c_mosfet_temp_c: toNumber(r.dcdc_pri_c_mosfet_temp_c),
             dcdc_sec_ls_mosfet_temp_c: toNumber(r.dcdc_sec_ls_mosfet_temp_c),
             dcdc_sec_hs_mosfet_temp_c: toNumber(r.dcdc_sec_hs_mosfet_temp_c),
-            dcdc_occurrence_count: toNumber(r.dcdc_occurence_count) ?? null, // spelling fixed for frontend
+            dcdc_occurrence_count: toNumber(r.dcdc_occurence_count) ?? null,
 
             // Calculated output power
             output_power_kw: null,

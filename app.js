@@ -3,30 +3,29 @@ const express = require('express');
 const cors = require('cors');
 const logger = require('./utils/logger');
 
-/* ROUTES */
-const authRoutes = require('./routes/auth');
-const customerRoutes = require('./routes/customer');
-const vehicleTypeRoutes = require('./routes/vehicleType');
-const vehicleCategoryRoutes = require('./routes/vehicleCategory');
-const vehicleMasterRoutes = require('./routes/vehicle-master');
-const vehicleRoutes = require('./routes/vehicle');
-const batteryRoutes = require('./routes/battery');
-const motorRoutes = require('./routes/motor');
-const faultsRoutes = require('./routes/faults');
-const configRoutes = require('./routes/config');
-const telemetryRoutes = require('./routes/telemetry');
-const databaseLogsRoutes = require('./routes/databaseLogs');
-const vcuRoutes = require('./routes/vcu');
-const hmiRoutes = require('./routes/hmi');
+/* ROUTES - Explicit .js extensions for reliable module resolution */
+const authRoutes             = require('./routes/auth.js');
+const customerRoutes         = require('./routes/customer.js');
+const vehicleTypeRoutes      = require('./routes/vehicleType.js');
+const vehicleCategoryRoutes  = require('./routes/vehicleCategory.js');
+const vehicleMasterRoutes    = require('./routes/vehicle-master.js');  // ← Fixed: was missing .js
+const vehicleRoutes          = require('./routes/vehicle.js');
+const batteryRoutes          = require('./routes/battery.js');
+const motorRoutes            = require('./routes/motor.js');
+const faultsRoutes           = require('./routes/faults.js');
+const configRoutes           = require('./routes/config.js');
+const telemetryRoutes        = require('./routes/telemetry.js');
+const databaseLogsRoutes     = require('./routes/databaseLogs.js');
+const vcuRoutes              = require('./routes/vcu.js');
+const hmiRoutes              = require('./routes/hmi.js');
 
 /* RATE LIMITERS */
 const { generalLimiter } = require('./middleware/rateLimiter');
-// Note: liveRateLimiter should be applied only on specific live endpoints (e.g. in telemetryRoutes)
 
 const app = express();
 
 /* =========================
-   CORS
+   CORS CONFIG
 ========================= */
 const allowedOrigins = [
   'http://localhost:3000',
@@ -40,6 +39,7 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps, Postman, etc.)
       if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
@@ -57,50 +57,46 @@ app.use(express.urlencoded({ extended: true }));
 /* =========================
    PUBLIC ROUTES (NO RATE LIMIT)
 ========================= */
-// Auth routes – must NOT be rate-limited globally for reliable tests
 app.use('/api/auth', authRoutes);
 
-// Health check
+// Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK' });
+  res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
 /* =========================
    PROTECTED API ROUTES (WITH GENERAL RATE LIMIT)
 ========================= */
-// Apply general rate limiting to all protected endpoints
-app.use('/api/customers', generalLimiter, customerRoutes);
-app.use('/api/vehicle-types', generalLimiter, vehicleTypeRoutes);
-app.use('/api/vehicle-categories', generalLimiter, vehicleCategoryRoutes);
-app.use('/api/vehicle-master', generalLimiter, vehicleMasterRoutes);
-app.use('/api/vehicles', generalLimiter, vehicleRoutes);
-app.use('/api/battery', generalLimiter, batteryRoutes);
-app.use('/api/motor', generalLimiter, motorRoutes);
-app.use('/api/faults', generalLimiter, faultsRoutes);
-app.use('/api/database-logs', generalLimiter, databaseLogsRoutes);
-app.use('/api/config', generalLimiter, configRoutes);
-app.use('/api/telemetry', generalLimiter, telemetryRoutes); // general first
-app.use('/api/vcu', generalLimiter, vcuRoutes);
-app.use('/api/hmi', generalLimiter, hmiRoutes);
+app.use('/api/customers',         generalLimiter, customerRoutes);
+app.use('/api/vehicle-types',     generalLimiter, vehicleTypeRoutes);
+app.use('/api/vehicle-categories',generalLimiter, vehicleCategoryRoutes);
+app.use('/api/vehicle-master',    generalLimiter, vehicleMasterRoutes);   // Now properly loaded
+app.use('/api/vehicles',          generalLimiter, vehicleRoutes);
+app.use('/api/battery',           generalLimiter, batteryRoutes);
+app.use('/api/motor',             generalLimiter, motorRoutes);
+app.use('/api/faults',            generalLimiter, faultsRoutes);
+app.use('/api/database-logs',     generalLimiter, databaseLogsRoutes);
+app.use('/api/config',            generalLimiter, configRoutes);
+app.use('/api/telemetry',         generalLimiter, telemetryRoutes);
+app.use('/api/vcu',               generalLimiter, vcuRoutes);
+app.use('/api/hmi',               generalLimiter, hmiRoutes);
 
 /* =========================
-   SPECIAL: Live/Telemetry Polling
-========================= */
-// If you have a specific high-frequency live endpoint, apply liveRateLimiter inside telemetryRoutes or vehicleRoutes
-// Example inside routes/telemetry.js:
-// router.get('/live', liveRateLimiter, liveController);
-
-/* =========================
-   404 + ERROR HANDLER
+   404 HANDLER
 ========================= */
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Route not found' });
 });
 
+/* =========================
+   GLOBAL ERROR HANDLER
+========================= */
 app.use((err, req, res, next) => {
-  logger.error(`Unhandled error: ${err.message}`);
-  console.error(err); // Extra visibility during dev/test
-  res.status(500).json({ error: 'Internal server error' });
+  logger.error(`Unhandled error: ${err.message}`, { stack: err.stack });
+  console.error(err); // Extra visibility in dev
+  res.status(err.status || 500).json({
+    error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message,
+  });
 });
 
 module.exports = app;

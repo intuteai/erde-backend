@@ -1,20 +1,20 @@
-// routes/customer.js
-
 const express = require('express');
-const bcrypt = require('bcrypt');
 const db = require('../config/postgres');
 const authenticateToken = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
 const logger = require('../utils/logger');
-console.log('authenticateToken:', typeof authenticateToken);
-console.log('checkPermission:', typeof checkPermission);
+
 const router = express.Router();
 const MODULE = 'customers';
 
+/* 🔐 DEFAULT PASSWORD (already bcrypt-hashed) */
+const DEFAULT_PASSWORD_HASH =
+  '$2a$10$XcmsTW5nP3mKQYQFvk7g7.DkCseqXgCxZB2Y/Kk8ExL6Kck.cRqA2';
+
 /* =========================================================
    GET CUSTOMERS
-   ADMIN  → all customers
-   CUSTOMER → only own customer record
+   ADMIN     → all customers
+   CUSTOMER  → only own record
 ========================================================= */
 router.get(
   '/',
@@ -56,6 +56,8 @@ router.get(
 
 /* =========================================================
    CREATE CUSTOMER + LOGIN (ADMIN ONLY)
+   - Email = Login ID
+   - Password = DEFAULT_PASSWORD_HASH
 ========================================================= */
 router.post(
   '/',
@@ -68,19 +70,19 @@ router.post(
       contact_person,
       phone,
       email,
-      password,
       name,
     } = req.body;
 
-    if (!company_name?.trim() || !email?.trim() || !password) {
+    if (!company_name?.trim() || !email?.trim()) {
       return res.status(400).json({
-        error: 'Company name, email, and password required',
+        error: 'Company name and email are required',
       });
     }
 
     try {
       await db.query('BEGIN');
 
+      /* Get customer role */
       const roleRes = await db.query(
         `SELECT role_id FROM roles WHERE role_name = 'customer'`
       );
@@ -89,8 +91,7 @@ router.post(
         throw new Error('Customer role not found');
       }
 
-      const hash = await bcrypt.hash(password, 10);
-
+      /* Create user with DEFAULT password */
       const userRes = await db.query(
         `
         INSERT INTO users (role_id, name, email, password_hash, created_at)
@@ -101,10 +102,11 @@ router.post(
           roleRes.rows[0].role_id,
           name?.trim() || company_name.trim(),
           email.trim(),
-          hash,
+          DEFAULT_PASSWORD_HASH,
         ]
       );
 
+      /* Create customer record */
       const custRes = await db.query(
         `
         INSERT INTO customer_master (
@@ -131,11 +133,13 @@ router.post(
 
       await db.query('COMMIT');
 
-      logger.info(`Customer created: ${company_name} (${email})`);
+      logger.info(
+        `Customer created: ${company_name} | login=${email} | default password assigned`
+      );
 
       res.status(201).json({
         customer_id: custRes.rows[0].customer_id,
-        message: 'Customer & login created',
+        message: 'Customer & login created with default password',
       });
     } catch (err) {
       await db.query('ROLLBACK');
@@ -143,7 +147,7 @@ router.post(
       logger.error(`POST /customers error: ${err.message}`);
 
       res.status(400).json({
-        error: err.message.includes('unique_email')
+        error: err.message.includes('unique')
           ? 'Email already exists'
           : 'Server error',
       });
@@ -153,8 +157,8 @@ router.post(
 
 /* =========================================================
    UPDATE CUSTOMER
-   ADMIN  → any customer
-   CUSTOMER → only own record
+   ADMIN     → any customer
+   CUSTOMER  → only own record
 ========================================================= */
 router.put(
   '/:id',
@@ -165,7 +169,7 @@ router.put(
     const { company_name, address, contact_person, phone } = req.body;
 
     try {
-      /* 🔐 TENANT ISOLATION (DB-BASED, CORRECT) */
+      /* 🔐 TENANT ISOLATION */
       if (req.user.role === 'customer') {
         const ownerCheck = await db.query(
           `

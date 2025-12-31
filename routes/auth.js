@@ -1,4 +1,4 @@
-// routes/auth.js
+// routes/auth.js - SAFE VERSION (USE THIS ONE)
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -8,9 +8,6 @@ require('dotenv').config();
 
 const router = express.Router();
 
-/**
- * POST /api/auth/login
- */
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
 
@@ -19,63 +16,81 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    const result = await db.query(
-      `
-      SELECT
-        u.user_id,
-        u.email,
-        u.password_hash,
-        u.name,
-        r.role_name,
-        cm.customer_id
-      FROM users u
-      JOIN roles r ON u.role_id = r.role_id
-      LEFT JOIN customer_master cm ON cm.user_id = u.user_id
-      WHERE u.email = $1
-      `,
+    logger.info(`Login attempt for email: ${email}`);
+
+    // Step 1: Get user
+    const userResult = await db.query(
+      'SELECT user_id, email, password_hash, name, role_id FROM users WHERE email = $1',
       [email]
     );
 
-    if (result.rows.length === 0) {
-      logger.warn(`Login failed: email not found - ${email}`);
+    if (userResult.rows.length === 0) {
+      logger.warn(`Login failed: User not found - ${email}`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const user = result.rows[0];
+    const user = userResult.rows[0];
 
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) {
-      logger.warn(`Login failed: wrong password - ${email}`);
+    // Step 2: Verify password
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+    if (!validPassword) {
+      logger.warn(`Login failed: Invalid password - ${email}`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // 🔐 JWT now includes customer_id for tenant isolation
+    // Step 3: Get role name safely
+    let roleName = 'customer';
+    try {
+      const roleResult = await db.query(
+        'SELECT role_name FROM roles WHERE role_id = $1',
+        [user.role_id]
+      );
+      if (roleResult.rows.length > 0) {
+        roleName = roleResult.rows[0].role_name;
+      }
+    } catch (e) {
+      logger.warn(`Role lookup failed for user ${email}: ${e.message}`);
+    }
+
+    // Step 4: Get customer_id safely
+    let customerId = null;
+    try {
+      const custResult = await db.query(
+        'SELECT customer_id FROM customer_master WHERE user_id = $1 LIMIT 1',
+        [user.user_id]
+      );
+      customerId = custResult.rows[0]?.customer_id || null;
+    } catch (e) {
+      logger.debug(`customer_master lookup skipped for ${email}`);
+    }
+
+    // Step 5: Generate token
     const token = jwt.sign(
       {
         user_id: user.user_id,
         email: user.email,
-        role: user.role_name,
-        name: user.name,
-        customer_id: user.customer_id || null,
+        role: roleName,
+        name: user.name || email.split('@')[0],
+        customer_id: customerId,
       },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
 
-    logger.info(`Login success: ${user.email} (${user.role_name})`);
+    logger.info(`Login SUCCESS: ${email} (role: ${roleName})`);
 
     res.json({
       token,
       user: {
-        name: user.name,
+        name: user.name || email.split('@')[0],
         email: user.email,
-        role: user.role_name,
-        customer_id: user.customer_id || null,
+        role: roleName,
+        customer_id: customerId,
       },
     });
   } catch (err) {
-    logger.error(`Login error: ${err.message}`);
-    res.status(500).json({ error: 'Server error' });
+    logger.error(`CRITICAL Login error for ${email}: ${err.message}`, { stack: err.stack });
+    res.status(500).json({ error: 'Server error during login' });
   }
 });
 

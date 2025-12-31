@@ -22,22 +22,20 @@ router.get(
           v.vtype_id,
           v.make,
           v.model,
-          v.capacity_kwh,
-          v.motor_specs,
+          v.capacity_tonne,
           v.category_id,
           c.category_name,
           v.architecture_diagram,
           v.drawings_folder_url,
           v.created_at
         FROM vehicle_type_master v
-        LEFT JOIN vehicle_categories c
-          ON c.category_id = v.category_id
+        LEFT JOIN vehicle_categories c ON c.category_id = v.category_id
         ORDER BY c.category_name, v.make, v.model
       `);
 
       res.json(result.rows);
     } catch (err) {
-      logger.error(`GET /vehicle-types error: ${err.message}`);
+      logger.error(`GET /api/vehicle-types error: ${err.message}`);
       res.status(500).json({ error: 'Server error' });
     }
   }
@@ -54,8 +52,7 @@ router.post(
     const {
       make,
       model,
-      capacity_kwh,
-      motor_specs,
+      capacity_tonne,
       category_id,
       architecture_diagram,
       drawings_folder_url
@@ -63,16 +60,11 @@ router.post(
 
     if (!make || !model || !category_id) {
       return res.status(400).json({
-        error: 'make, model and category_id are required'
+        error: 'make, model, and category_id are required'
       });
     }
 
-    if (
-      typeof make !== 'string' ||
-      typeof model !== 'string' ||
-      !make.trim() ||
-      !model.trim()
-    ) {
+    if (typeof make !== 'string' || typeof model !== 'string' || !make.trim() || !model.trim()) {
       return res.status(400).json({ error: 'Invalid make or model' });
     }
 
@@ -82,21 +74,19 @@ router.post(
         INSERT INTO vehicle_type_master (
           make,
           model,
-          capacity_kwh,
-          motor_specs,
+          capacity_tonne,
           category_id,
           architecture_diagram,
           drawings_folder_url,
           created_by
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING vtype_id
         `,
         [
           make.trim(),
           model.trim(),
-          capacity_kwh || null,
-          motor_specs || null,
+          capacity_tonne ? parseFloat(capacity_tonne) : null, // ensure numeric
           category_id,
           architecture_diagram || null,
           drawings_folder_url || null,
@@ -106,9 +96,12 @@ router.post(
 
       res.status(201).json({ vtype_id: result.rows[0].vtype_id });
     } catch (err) {
-      logger.error(`POST /vehicle-types error: ${err.message}`);
+      logger.error(`POST /api/vehicle-types error: ${err.message}`);
       if (err.code === '23505') {
+        // Unique violation on make + model
         res.status(400).json({ error: 'Make + Model already exists' });
+      } else if (err.code === '23503') {
+        res.status(400).json({ error: 'Invalid category_id: category does not exist' });
       } else {
         res.status(500).json({ error: 'Server error' });
       }
@@ -117,7 +110,7 @@ router.post(
 );
 
 /* ============================================================
-   UPDATE VEHICLE TYPE  ✅ FIXED
+   UPDATE VEHICLE TYPE
 ============================================================ */
 router.put(
   '/:id',
@@ -128,61 +121,49 @@ router.put(
     const {
       make,
       model,
-      capacity_kwh,
-      motor_specs,
+      capacity_tonne,
       category_id,
       architecture_diagram,
       drawings_folder_url
     } = req.body;
 
+    if (isNaN(id)) {
+      return res.status(400).json({ error: 'Invalid vehicle type id' });
+    }
+
+    // Check if record exists
+    const existing = await db.query(
+      `SELECT vtype_id FROM vehicle_type_master WHERE vtype_id = $1`,
+      [id]
+    );
+
+    if (existing.rowCount === 0) {
+      return res.status(404).json({ error: 'Vehicle type not found' });
+    }
+
+    // Validate required fields
+    if (!make || !model || typeof make !== 'string' || typeof model !== 'string' || !make.trim() || !model.trim()) {
+      return res.status(400).json({ error: 'Invalid make or model' });
+    }
+
     try {
-      /* 1️⃣ Validate ID */
-      if (isNaN(id)) {
-        return res.status(400).json({ error: 'Invalid vehicle type id' });
-      }
-
-      /* 2️⃣ Check existence FIRST */
-      const existing = await db.query(
-        `SELECT vtype_id FROM vehicle_type_master WHERE vtype_id = $1`,
-        [id]
-      );
-
-      if (existing.rowCount === 0) {
-        return res.status(404).json({ error: 'Vehicle type not found' });
-      }
-
-      /* 3️⃣ Validate input AFTER existence */
-      if (
-        !make ||
-        !model ||
-        typeof make !== 'string' ||
-        typeof model !== 'string' ||
-        !make.trim() ||
-        !model.trim()
-      ) {
-        return res.status(400).json({ error: 'Invalid make or model' });
-      }
-
-      /* 4️⃣ Safe update */
       await db.query(
         `
         UPDATE vehicle_type_master
         SET
           make = $1,
           model = $2,
-          capacity_kwh = $3,
-          motor_specs = $4,
-          category_id = $5,
-          architecture_diagram = $6,
-          drawings_folder_url = $7,
+          capacity_tonne = $3,
+          category_id = $4,
+          architecture_diagram = $5,
+          drawings_folder_url = $6,
           updated_at = NOW()
-        WHERE vtype_id = $8
+        WHERE vtype_id = $7
         `,
         [
           make.trim(),
           model.trim(),
-          capacity_kwh || null,
-          motor_specs || null,
+          capacity_tonne ? parseFloat(capacity_tonne) : null,
           category_id,
           architecture_diagram || null,
           drawings_folder_url || null,
@@ -192,8 +173,14 @@ router.put(
 
       res.json({ success: true });
     } catch (err) {
-      logger.error(`PUT /vehicle-types/${id} error: ${err.message}`);
-      res.status(500).json({ error: 'Server error' });
+      logger.error(`PUT /api/vehicle-types/${id} error: ${err.message}`);
+      if (err.code === '23505') {
+        res.status(400).json({ error: 'Make + Model already exists' });
+      } else if (err.code === '23503') {
+        res.status(400).json({ error: 'Invalid category_id: category does not exist' });
+      } else {
+        res.status(500).json({ error: 'Server error' });
+      }
     }
   }
 );
@@ -206,22 +193,32 @@ router.delete(
   authenticateToken,
   checkPermission(MODULE, 'delete'),
   async (req, res) => {
+    const { id } = req.params;
+
+    if (isNaN(id)) {
+      return res.status(400).json({ error: 'Invalid vehicle type id' });
+    }
+
     try {
       const result = await db.query(
         `DELETE FROM vehicle_type_master WHERE vtype_id = $1 RETURNING vtype_id`,
-        [req.params.id]
+        [id]
       );
 
       if (result.rowCount === 0) {
-        return res.status(404).json({ error: 'Not found' });
+        return res.status(404).json({ error: 'Vehicle type not found' });
       }
 
       res.json({ success: true });
     } catch (err) {
-      logger.error(`DELETE /vehicle-types error: ${err.message}`);
-      res.status(400).json({
-        error: 'Cannot delete: used in vehicle_master'
-      });
+      logger.error(`DELETE /api/vehicle-types/${id} error: ${err.message}`);
+      if (err.code === '23503') {
+        res.status(400).json({
+          error: 'Cannot delete: this vehicle type is used in one or more vehicles'
+        });
+      } else {
+        res.status(500).json({ error: 'Server error' });
+      }
     }
   }
 );
