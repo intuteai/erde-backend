@@ -3,12 +3,12 @@ const express = require('express');
 const cors = require('cors');
 const logger = require('./utils/logger');
 
-/* ROUTES - Explicit .js extensions for reliable module resolution */
+/* ROUTES */
 const authRoutes             = require('./routes/auth.js');
 const customerRoutes         = require('./routes/customer.js');
 const vehicleTypeRoutes      = require('./routes/vehicleType.js');
 const vehicleCategoryRoutes  = require('./routes/vehicleCategory.js');
-const vehicleMasterRoutes    = require('./routes/vehicle-master.js');  // ← Fixed: was missing .js
+const vehicleMasterRoutes    = require('./routes/vehicle-master.js');
 const vehicleRoutes          = require('./routes/vehicle.js');
 const batteryRoutes          = require('./routes/battery.js');
 const motorRoutes            = require('./routes/motor.js');
@@ -39,7 +39,6 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps, Postman, etc.)
       if (!origin || allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
@@ -55,31 +54,35 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 /* =========================
-   PUBLIC ROUTES (NO RATE LIMIT)
+   PUBLIC ROUTES
 ========================= */
 app.use('/api/auth', authRoutes);
 
-// Health check endpoint
+// Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
 /* =========================
-   PROTECTED API ROUTES (WITH GENERAL RATE LIMIT)
+   PROTECTED ROUTES
 ========================= */
-app.use('/api/customers',         generalLimiter, customerRoutes);
-app.use('/api/vehicle-types',     generalLimiter, vehicleTypeRoutes);
-app.use('/api/vehicle-categories',generalLimiter, vehicleCategoryRoutes);
-app.use('/api/vehicle-master',    generalLimiter, vehicleMasterRoutes);   // Now properly loaded
-app.use('/api/vehicles',          generalLimiter, vehicleRoutes);
-app.use('/api/battery',           generalLimiter, batteryRoutes);
-app.use('/api/motor',             generalLimiter, motorRoutes);
-app.use('/api/faults',            generalLimiter, faultsRoutes);
-app.use('/api/database-logs',     generalLimiter, databaseLogsRoutes);
-app.use('/api/config',            generalLimiter, configRoutes);
-app.use('/api/telemetry',         generalLimiter, telemetryRoutes);
-app.use('/api/vcu',               generalLimiter, vcuRoutes);
-app.use('/api/hmi',               generalLimiter, hmiRoutes);
+app.use('/api/customers',          generalLimiter, customerRoutes);
+app.use('/api/vehicle-types',      generalLimiter, vehicleTypeRoutes);
+app.use('/api/vehicle-categories', generalLimiter, vehicleCategoryRoutes);
+
+/* 🔥 IMPORTANT FIX — DUAL MOUNT 🔥 */
+app.use('/api/vehicle-master', generalLimiter, vehicleMasterRoutes);
+app.use('/vehicle-master',     generalLimiter, vehicleMasterRoutes); // ← added
+
+app.use('/api/vehicles',       generalLimiter, vehicleRoutes);
+app.use('/api/battery',        generalLimiter, batteryRoutes);
+app.use('/api/motor',          generalLimiter, motorRoutes);
+app.use('/api/faults',         generalLimiter, faultsRoutes);
+app.use('/api/database-logs',  generalLimiter, databaseLogsRoutes);
+app.use('/api/config',         generalLimiter, configRoutes);
+app.use('/api/telemetry',      generalLimiter, telemetryRoutes);
+app.use('/api/vcu',            generalLimiter, vcuRoutes);
+app.use('/api/hmi',            generalLimiter, hmiRoutes);
 
 /* =========================
    404 HANDLER
@@ -93,9 +96,11 @@ app.use('*', (req, res) => {
 ========================= */
 app.use((err, req, res, next) => {
   logger.error(`Unhandled error: ${err.message}`, { stack: err.stack });
-  console.error(err); // Extra visibility in dev
   res.status(err.status || 500).json({
-    error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message,
+    error:
+      process.env.NODE_ENV === 'production'
+        ? 'Internal server error'
+        : err.message,
   });
 });
 
