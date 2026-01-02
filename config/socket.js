@@ -6,25 +6,21 @@ const { parseCanDataWithDB } = require("../services/dbParser");
 const db = require("../config/postgres");
 require("dotenv").config();
 
-const initWebSocket = (server) => {
+/**
+ * Initialize Raw WebSocket Server for /aws-ws
+ * Bridges parsed CAN data to Socket.IO clients in the frontend
+ */
+const initWebSocket = (server, app) => {
   const wss = new WebSocket.Server({ noServer: true });
   const awsWsPool = new Map();
 
-  /* =========================================================
-     HTTP → WS UPGRADE HANDLER
-     - Allow Socket.IO to handle /socket.io/* upgrades
-     - Only allow raw WebSocket upgrades on /aws-ws (with or without query params)
-     - Reject everything else early
-  ========================================================= */
   server.on("upgrade", (req, socket, head) => {
     const { url } = req;
 
-    // Let Socket.IO handle its own namespace
     if (url.startsWith("/socket.io")) {
-      return; // Socket.IO will handle this upgrade itself
+      return;
     }
 
-    // Strict path check: only allow /aws-ws or /aws-ws?params...
     const path = url.split("?")[0];
     if (path !== "/aws-ws") {
       logger.warn(`Rejected invalid WS upgrade attempt: ${url}`);
@@ -39,11 +35,7 @@ const initWebSocket = (server) => {
     });
   });
 
-  /* =========================================================
-     RAW WEBSOCKET CONNECTION HANDLER
-  ========================================================= */
   wss.on("connection", async (ws, req) => {
-    // Parse URL properly (handles query params correctly)
     let url;
     try {
       url = new URL(req.url, `http://${req.headers.host}`);
@@ -55,9 +47,6 @@ const initWebSocket = (server) => {
     const token = url.searchParams.get("token");
     const deviceId = url.searchParams.get("device_id") || "VCL001";
 
-    /* =========================
-       JWT AUTHENTICATION
-    ========================= */
     if (!token) {
       logger.warn(`WS connection rejected: Missing token (${deviceId})`);
       return ws.close(4001, "Token missing");
@@ -74,15 +63,10 @@ const initWebSocket = (server) => {
       return ws.close(4002, "Invalid token");
     }
 
-    /* =========================
-       MAP DEVICE_ID → VEHICLE_MASTER_ID
-    ========================= */
     let vehicleMasterId;
     try {
       const res = await db.query(
-        `SELECT vehicle_master_id
-         FROM vehicle_master
-         WHERE vehicle_unique_id = $1`,
+        `SELECT vehicle_master_id FROM vehicle_master WHERE vehicle_unique_id = $1`,
         [deviceId]
       );
 
@@ -98,9 +82,6 @@ const initWebSocket = (server) => {
       return ws.close(5000, "Server error");
     }
 
-    /* =========================
-       AWS WEBSOCKET CONNECTION (ONE PER DEVICE)
-    ========================= */
     let awsWs = awsWsPool.get(deviceId);
 
     if (!awsWs || awsWs.readyState !== WebSocket.OPEN) {
@@ -109,17 +90,11 @@ const initWebSocket = (server) => {
           headers: {
             Authorization: `Bearer ${process.env.AWS_API_KEY}`,
           },
-          // Optional: increase timeout if AWS endpoint is slow
           handshakeTimeout: 10000,
         });
 
         awsWs.on("open", () => {
-          awsWs.send(
-            JSON.stringify({
-              action: "subscribe",
-              device_id: deviceId,
-            })
-          );
+          awsWs.send(JSON.stringify({ action: "subscribe", device_id: deviceId }));
           logger.info(`AWS WS connected and subscribed: ${deviceId}`);
         });
 
@@ -127,14 +102,11 @@ const initWebSocket = (server) => {
           try {
             const raw = JSON.parse(data.toString());
             const payloadHex = raw.payload || raw.items?.[0]?.payload;
-
-            if (!payloadHex) {
-              return; // No payload to process
-            }
+            if (!payloadHex) return;
 
             const parsed = await parseCanDataWithDB(payloadHex, vehicleMasterId);
 
-            /* ===== SAVE LIVE VALUES TO DB ===== */
+            // Save live values
             const keys = Object.keys(parsed).filter(
               (k) => !["timestamp", "fault_code", "fault_description"].includes(k)
             );
@@ -145,48 +117,44 @@ const initWebSocket = (server) => {
               const placeholders = values.map((_, i) => `$${i + 1}`).join(", ");
 
               await db.query(
-                `
-                INSERT INTO live_values (${columns})
-                VALUES (${placeholders})
-                ON CONFLICT (vehicle_master_id)
-                DO UPDATE SET
-                  ${keys.map((k) => `${k} = EXCLUDED.${k}`).join(", ")}
-                `,
+                `INSERT INTO live_values (${columns}) VALUES (${placeholders})
+                 ON CONFLICT (vehicle_master_id) DO UPDATE SET
+                 ${keys.map((k) => `${k} = EXCLUDED.${k}`).join(", ")}`,
                 values
               );
             }
 
-            /* ===== SAVE DTC EVENTS ===== */
+            // Save DTC
             if (parsed.fault_code) {
               await db.query(
-                `
-                INSERT INTO dtc_events (vehicle_master_id, code, description, recorded_at)
-                VALUES ($1, $2, $3, NOW())
-                ON CONFLICT DO NOTHING
-                `,
+                `INSERT INTO dtc_events (vehicle_master_id, code, description, recorded_at)
+                 VALUES ($1, $2, $3, NOW()) ON CONFLICT DO NOTHING`,
                 [vehicleMasterId, parsed.fault_code, parsed.fault_description || "Unknown"]
               );
             }
 
-            /* ===== BROADCAST TO ALL CONNECTED CLIENTS FOR THIS DEVICE ===== */
-            const broadcast = {
-              ...parsed,
-              timestamp: Date.now(),
-              deviceId,
-            };
+            const broadcast = { ...parsed, timestamp: Date.now(), deviceId };
 
+            // Broadcast to raw WS clients
             wss.clients.forEach((client) => {
-              if (
-                client.readyState === WebSocket.OPEN &&
-                client.deviceId === deviceId
-              ) {
+              if (client.readyState === WebSocket.OPEN && client.deviceId === deviceId) {
                 try {
                   client.send(JSON.stringify(broadcast));
-                } catch (sendErr) {
-                  logger.warn(`Failed to send to client (${deviceId}): ${sendErr.message}`);
+                } catch (e) {
+                  logger.warn(`Failed to send to raw client (${deviceId}): ${e.message}`);
                 }
               }
             });
+
+            // Broadcast to Socket.IO frontend clients
+            const io = app.get("io");
+            if (io) {
+              const room = `vehicle:${vehicleMasterId}`;  // FIXED: Matches socket.io.js
+              io.to(room).emit("live_update", broadcast);
+              logger.info(`Broadcasted live_update to Socket.IO room: ${room}`);
+            } else {
+              logger.warn("Socket.IO instance not available for broadcasting");
+            }
 
             logger.info(`Live data processed & broadcasted: ${deviceId}`);
           } catch (err) {
@@ -204,36 +172,26 @@ const initWebSocket = (server) => {
           awsWsPool.delete(deviceId);
         });
 
-        // Store in pool
         awsWsPool.set(deviceId, awsWs);
       } catch (err) {
-        logger.error(`Failed to create AWS WS connection (${deviceId}): ${err.message}`);
+        logger.error(`Failed to create AWS WS (${deviceId}): ${err.message}`);
         return ws.close(5001, "Failed to connect to data source");
       }
     }
 
-    /* =========================
-       FORWARD CLIENT MESSAGES TO AWS (e.g., commands)
-    ========================= */
     ws.on("message", (msg) => {
       if (awsWs?.readyState === WebSocket.OPEN) {
         try {
           awsWs.send(msg);
         } catch (err) {
-          logger.error(`Failed to forward message to AWS (${deviceId}): ${err.message}`);
+          logger.error(`Failed to forward to AWS (${deviceId}): ${err.message}`);
         }
       }
     });
 
-    /* =========================
-       CLEANUP ON CLIENT DISCONNECT
-    ========================= */
-    ws.on("close", (code, reason) => {
-      logger.info(
-        `Raw WS client disconnected: ${ws.user?.username || "unknown"} (${deviceId}) - Code: ${code}`
-      );
+    ws.on("close", (code) => {
+      logger.info(`Raw WS disconnected: ${ws.user?.username || "unknown"} (${deviceId}) - Code: ${code}`);
 
-      // Check if any other clients are still connected to this device
       const hasActiveClients = [...wss.clients].some(
         (c) => c.readyState === WebSocket.OPEN && c.deviceId === deviceId
       );
@@ -241,11 +199,10 @@ const initWebSocket = (server) => {
       if (!hasActiveClients && awsWs) {
         awsWs.close();
         awsWsPool.delete(deviceId);
-        logger.info(`AWS WS closed due to no active clients: ${deviceId}`);
+        logger.info(`AWS WS closed (no clients): ${deviceId}`);
       }
     });
 
-    // Optional: handle sudden errors on client socket
     ws.on("error", (err) => {
       logger.warn(`Raw WS client error (${deviceId}): ${err.message}`);
     });

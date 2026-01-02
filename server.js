@@ -1,3 +1,4 @@
+// server.js
 const http = require("http");
 const { Server } = require("socket.io");
 const app = require("./app");
@@ -6,8 +7,8 @@ const logger = require("./utils/logger");
 /* =========================
    INIT MODULES
 ========================= */
-const initSocketIO = require("./socket.io");          // Socket.IO handlers
-const initRawWebSocket = require("./config/socket");  // Raw WS (AWS / CAN)
+const initSocketIO = require("./socket.io");          // Socket.IO handlers for frontend
+const initRawWebSocket = require("./config/socket");  // Raw WS (AWS / CAN) → bridges to Socket.IO
 const telemetryService = require("./services/telemetryService");
 
 const PORT = process.env.SERVER_PORT || 5000;
@@ -18,7 +19,7 @@ const PORT = process.env.SERVER_PORT || 5000;
 const server = http.createServer(app);
 
 /* =========================
-   SOCKET.IO SERVER (MUST BE FIRST)
+   SOCKET.IO SERVER
 ========================= */
 const io = new Server(server, {
   cors: {
@@ -32,18 +33,23 @@ const io = new Server(server, {
 });
 
 /* =========================
-   INJECT SOCKET.IO INTO SERVICES
+   MAKE SOCKET.IO GLOBALLY ACCESSIBLE
 ========================= */
+// Critical: Store io on the Express app so raw WebSocket can access it
+app.set("io", io);
+
+// Pass to services that need direct access
 telemetryService.setSocketIO(io);
 
 /* =========================
    REGISTER REALTIME LAYERS
 ========================= */
-// 1️⃣ Socket.IO (Frontend)
+
+// 1️⃣ Socket.IO for React Frontend (root namespace)
 initSocketIO(io);
 
-// 2️⃣ Raw WebSocket (AWS / Devices) — scoped to /aws-ws internally
-initRawWebSocket(server);
+// 2️⃣ Raw WebSocket (/aws-ws) — now with access to io for broadcasting live data
+initRawWebSocket(server, app);  // ← Pass 'app' here
 
 /* =========================
    START SERVER
