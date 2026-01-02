@@ -1,23 +1,22 @@
 /**
- * Rate Limiter Middleware (In-Memory, Memory-Safe)
+ * Rate Limiter Middleware (In-Memory, Memory-Safe, Session-Aware)
  *
- * ✔ Per-user limiting (JWT based)
- * ✔ Per-endpoint bucket
+ * ✔ Session-scoped limiting (user + device)
+ * ✔ Per-endpoint bucket support
  * ✔ Retry-After header
  * ✔ 429 response
  * ✔ Automatic cleanup (no memory leak)
- * ✔ Jest-friendly (deterministic)
- * ✔ Test environment adjustments for reliable CI
+ * ✔ Windows / Jest safe
+ * ✔ Fail-open on internal errors
  */
 
 const logger = require('../utils/logger');
 
 /* =========================
-   CONFIG (tunable)
+   CONFIG
 ========================= */
-const DEFAULT_WINDOW_MS = 60_000;   // 1 minute
-const DEFAULT_MAX_REQUESTS = 100;
-
+const DEFAULT_WINDOW_MS = 60_000;        // 1 minute
+const DEFAULT_MAX_REQUESTS = 200;        // ↑ increased
 const CLEANUP_INTERVAL_MS = 60_000;
 
 /* =========================
@@ -26,19 +25,51 @@ const CLEANUP_INTERVAL_MS = 60_000;
 const buckets = new Map();
 
 /* =========================
-   CLEANUP (memory safety)
+   CLEANUP (SINGLE TIMER)
 ========================= */
-const cleanup = () => {
+function cleanup() {
   const now = Date.now();
   for (const [key, entry] of buckets.entries()) {
     if (entry.resetAt <= now) {
       buckets.delete(key);
     }
   }
-};
+}
 
-const cleanupTimer = setInterval(cleanup, CLEANUP_INTERVAL_MS);
-cleanupTimer.unref();
+// Prevent duplicate timers (nodemon / jest / hot reload)
+if (!global.__RATE_LIMITER_CLEANUP__) {
+  global.__RATE_LIMITER_CLEANUP__ = setInterval(cleanup, CLEANUP_INTERVAL_MS);
+
+  if (typeof global.__RATE_LIMITER_CLEANUP__.unref === 'function') {
+    global.__RATE_LIMITER_CLEANUP__.unref();
+  }
+}
+
+/* =========================
+   KEY GENERATOR
+========================= */
+function buildKey(req, keyPrefix, isTestEnv) {
+  // Authenticated users → session scoped
+  if (req.user?.user_id) {
+    const ua = req.headers['user-agent'] || 'ua';
+    const ip = req.ip || 'ip';
+    return `${keyPrefix}:user:${req.user.user_id}:${ip}:${ua}`;
+  }
+
+  // Test environment (deterministic)
+  if (isTestEnv) {
+    const authHeader = req.headers.authorization || req.headers.Authorization;
+    if (authHeader?.startsWith('Bearer ')) {
+      return `${keyPrefix}:test:${authHeader.split(' ')[1]}`;
+    }
+    return `${keyPrefix}:test:unauthenticated`;
+  }
+
+  // Public / unauthenticated fallback
+  const ua = req.headers['user-agent'] || 'ua';
+  const ip = req.ip || 'ip';
+  return `${keyPrefix}:public:${ip}:${ua}`;
+}
 
 /* =========================
    RATE LIMITER FACTORY
@@ -47,9 +78,7 @@ function rateLimiter(options = {}) {
   const isTestEnv = process.env.NODE_ENV === 'test';
 
   const windowMs = options.windowMs ?? DEFAULT_WINDOW_MS;
-  const max = isTestEnv 
-    ? (options.max ?? 20)
-    : (options.max ?? DEFAULT_MAX_REQUESTS);
+  const max = options.max ?? DEFAULT_MAX_REQUESTS;
 
   const keyPrefix = options.keyPrefix ?? 'global';
   const message = options.message ?? 'Too many requests';
@@ -62,45 +91,36 @@ function rateLimiter(options = {}) {
     }
 
     try {
-      let userId;
-
-      if (req.user?.user_id) {
-        userId = req.user.user_id;
-      } else if (isTestEnv) {
-        const authHeader = req.headers.authorization || req.headers.Authorization;
-        if (authHeader && authHeader.startsWith('Bearer ')) {
-          const token = authHeader.split(' ')[1];
-          // Use the full token — guaranteed unique per user
-          userId = `test_user_${token}`;
-        } else {
-          userId = 'test_unauthenticated';
-        }
-      } else {
-        userId = req.ip || 'anonymous';
-      }
-
       const now = Date.now();
-      const key = `${keyPrefix}:${userId}`;
+      const key = buildKey(req, keyPrefix, isTestEnv);
 
       let entry = buckets.get(key);
 
       if (!entry || entry.resetAt <= now) {
-        entry = { count: 1, resetAt: now + windowMs };
-        buckets.set(key, entry);
+        buckets.set(key, {
+          count: 1,
+          resetAt: now + windowMs,
+        });
         return next();
       }
 
       entry.count += 1;
 
       if (entry.count > max) {
-        const retryAfterSeconds = Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
-        res.setHeader('Retry-After', retryAfterSeconds);
+        const retryAfter = Math.max(
+          1,
+          Math.ceil((entry.resetAt - now) / 1000)
+        );
 
-        logger.warn(`Rate limit exceeded: user=${userId}, key=${keyPrefix}, count=${entry.count}, max=${max}`);
+        res.setHeader('Retry-After', retryAfter);
+
+        logger.warn(
+          `Rate limit exceeded: key=${keyPrefix}, count=${entry.count}, max=${max}`
+        );
 
         return res.status(statusCode).json({
           error: message,
-          retry_after: retryAfterSeconds,
+          retry_after: retryAfter,
         });
       }
 
@@ -118,28 +138,33 @@ function rateLimiter(options = {}) {
 module.exports = {
   rateLimiter,
 
+  // General API (admin dashboards, CRUD)
   generalLimiter: rateLimiter({
     windowMs: 60_000,
-    max: 20,
+    max: 200,               // ↑ increased
     keyPrefix: 'general',
   }),
 
+  // Live telemetry / polling
   liveRateLimiter: rateLimiter({
     windowMs: 60_000,
-    max: 120,
+    max: 300,               // ↑ increased for dashboards
     keyPrefix: 'live',
     message: 'Too many live view requests. Please slow down polling.',
     skipInTest: true,
   }),
 
+  // Auth / sensitive actions
   strictLimiter: rateLimiter({
     windowMs: 15_000,
-    max: 5,
+    max: 10,                // ↑ slightly relaxed
     keyPrefix: 'strict',
   }),
 };
 
-// ==================== TEST HELPERS (ONLY IN TEST ENV) ====================
+/* =========================
+   TEST HELPERS
+========================= */
 if (process.env.NODE_ENV === 'test') {
   module.exports._resetAllBuckets = () => buckets.clear();
 }

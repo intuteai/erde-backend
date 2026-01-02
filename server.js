@@ -5,10 +5,24 @@ const app = require("./app");
 const logger = require("./utils/logger");
 
 /* =========================
+   TRUST PROXY (IMPORTANT)
+========================= */
+/**
+ * Required when running behind:
+ * - AWS ALB / ELB
+ * - NGINX
+ * - Cloudflare
+ *
+ * Ensures req.ip is the REAL client IP
+ * (critical for rate limiting)
+ */
+app.set("trust proxy", true);
+
+/* =========================
    INIT MODULES
 ========================= */
-const initSocketIO = require("./socket.io");          // Socket.IO handlers for frontend
-const initRawWebSocket = require("./config/socket");  // Raw WS (AWS / CAN) → bridges to Socket.IO
+const initSocketIO = require("./socket.io");          // Socket.IO → React frontend
+const initRawWebSocket = require("./config/socket");  // Raw WS (AWS / CAN → Socket.IO)
 const telemetryService = require("./services/telemetryService");
 
 const PORT = process.env.SERVER_PORT || 5000;
@@ -30,30 +44,58 @@ const io = new Server(server, {
     ],
     credentials: true,
   },
+
+  // Helps with reconnects & unstable networks
+  pingTimeout: 20000,
+  pingInterval: 25000,
 });
 
 /* =========================
    MAKE SOCKET.IO GLOBALLY ACCESSIBLE
 ========================= */
-// Critical: Store io on the Express app so raw WebSocket can access it
+/**
+ * Critical:
+ * - Express routes
+ * - Raw WebSocket server
+ * - Telemetry services
+ * all need access to io
+ */
 app.set("io", io);
-
-// Pass to services that need direct access
 telemetryService.setSocketIO(io);
 
 /* =========================
    REGISTER REALTIME LAYERS
 ========================= */
 
-// 1️⃣ Socket.IO for React Frontend (root namespace)
+// 1️⃣ Socket.IO (React frontend)
 initSocketIO(io);
 
-// 2️⃣ Raw WebSocket (/aws-ws) — now with access to io for broadcasting live data
-initRawWebSocket(server, app);  // ← Pass 'app' here
+// 2️⃣ Raw WebSocket (/aws-ws) → bridges to Socket.IO
+// Passing both server + app is CORRECT
+initRawWebSocket(server, app);
 
 /* =========================
    START SERVER
 ========================= */
 server.listen(PORT, "0.0.0.0", () => {
   logger.info(`EV Dashboard Backend LIVE on http://0.0.0.0:${PORT}`);
+});
+
+/* =========================
+   GRACEFUL SHUTDOWN (OPTIONAL BUT RECOMMENDED)
+========================= */
+process.on("SIGTERM", () => {
+  logger.warn("SIGTERM received. Shutting down gracefully...");
+  server.close(() => {
+    logger.info("HTTP server closed");
+    process.exit(0);
+  });
+});
+
+process.on("SIGINT", () => {
+  logger.warn("SIGINT received. Shutting down gracefully...");
+  server.close(() => {
+    logger.info("HTTP server closed");
+    process.exit(0);
+  });
 });
