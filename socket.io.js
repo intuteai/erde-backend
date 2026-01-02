@@ -1,3 +1,5 @@
+// socket.io.js
+const logger = require("./utils/logger");  // ← Use your existing logger
 const socketAuth = require("./middleware/socketAuth");
 
 module.exports = function initSocketIO(io) {
@@ -7,30 +9,32 @@ module.exports = function initSocketIO(io) {
   io.use(socketAuth);
 
   /* =========================
-     CONNECTION HANDLER
+     CONNECTION HANDLER (Root Namespace)
   ========================= */
   io.on("connection", (socket) => {
-    console.log(
-      "Socket.IO connected:",
-      socket.id,
-      "user:",
-      socket.user?.user_id
+    logger.info(
+      `Socket.IO connected: ${socket.id} | User ID: ${socket.user?.user_id || "unknown"} | Username: ${socket.user?.username || "N/A"}`
     );
 
     /* =========================
        VEHICLE SUBSCRIPTION
     ========================= */
     socket.on("subscribe_vehicle", ({ vehicleId }) => {
-      if (!vehicleId) return;
+      if (!vehicleId) {
+        logger.warn(`subscribe_vehicle called without vehicleId from socket ${socket.id}`);
+        return;
+      }
 
-      socket.join(`vehicle:${vehicleId}`);
-      console.log(
-        `Socket ${socket.id} subscribed to vehicle:${vehicleId}`
-      );
+      const room = `vehicle:${vehicleId}`;
+      socket.join(room);
+      logger.info(`Socket ${socket.id} subscribed to room: ${room}`);
     });
 
-    socket.on("disconnect", () => {
-      console.log("Socket.IO disconnected:", socket.id);
+    /* =========================
+       DISCONNECT
+    ========================= */
+    socket.on("disconnect", (reason) => {
+      logger.info(`Socket.IO disconnected: ${socket.id} | Reason: ${reason}`);
     });
   });
 };
