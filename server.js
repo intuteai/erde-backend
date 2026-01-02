@@ -48,6 +48,6 @@ initRawWebSocket(server);
 /* =========================
    START SERVER
 ========================= */
-server.listen(PORT, () => {
-  logger.info(`EV Dashboard Backend LIVE on http://localhost:${PORT}`);
+server.listen(PORT, "0.0.0.0", () => {
+  logger.info(`EV Dashboard Backend LIVE on http://0.0.0.0:${PORT}`);
 });
