@@ -5,7 +5,7 @@ const authenticateToken = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
 const { generalLimiter, liveRateLimiter } = require('../middleware/rateLimiter');
 const logger = require('../utils/logger');
-const { formatLiveData } = require('../utils/formatLiveData'); // ← NEW: Shared formatting
+const { formatLiveData } = require('../utils/formatLiveData');
 
 const router = express.Router();
 
@@ -13,7 +13,7 @@ const router = express.Router();
    IN-MEMORY LIVE CACHE (STAMPEDE-PROTECTED, 1.5s TTL)
 ============================================================ */
 const LIVE_CACHE_TTL_MS = 1500;
-const liveCache = new Map(); // key: `vehicle_live:${id}`
+const liveCache = new Map();
 
 const cleanupLiveCache = () => {
   const now = Date.now();
@@ -35,6 +35,7 @@ router.get(
   async (req, res) => {
     try {
       const isCustomer = req.user.role === 'customer';
+
       const result = await db.query(
         `
         SELECT
@@ -56,6 +57,7 @@ router.get(
         `,
         [isCustomer ? req.user.user_id : null]
       );
+
       res.json(result.rows);
     } catch (err) {
       logger.error(`GET /vehicles error: ${err.message}`);
@@ -75,6 +77,7 @@ router.get(
   async (req, res) => {
     const { id } = req.params;
     const isCustomer = req.user.role === 'customer';
+
     try {
       const result = await db.query(
         `
@@ -99,17 +102,18 @@ router.get(
       }
 
       const live = await db.query(
-        `SELECT total_running_hrs, total_kwh_consumed
-         FROM live_values
-         WHERE vehicle_master_id = $1
-         ORDER BY recorded_at DESC
-         LIMIT 1`,
+        `
+        SELECT total_running_hrs, total_kwh_consumed
+        FROM live_values
+        WHERE vehicle_master_id = $1
+        ORDER BY recorded_at DESC
+        LIMIT 1
+        `,
         [id]
       );
 
       const l = live.rows[0] || {};
 
-      // Simple formatting for summary (kept minimal — could also extract if needed)
       const intervalToHours = (interval) => {
         if (!interval) return null;
         const { days = 0, hours = 0, minutes = 0, seconds = 0 } = interval;
@@ -140,8 +144,7 @@ router.get(
 );
 
 /* ============================================================
-   GET /api/vehicles/:id/live — COMPLETE LIVE DATA
-   Now uses shared formatLiveData() → identical to Socket.IO broadcast
+   GET /api/vehicles/:id/live — COMPLETE LIVE DATA (SNAPSHOT)
 ============================================================ */
 router.get(
   '/:id/live',
@@ -158,7 +161,6 @@ router.get(
     const getEntry = () => liveCache.get(cacheKey);
 
     try {
-      // Return cached data if fresh
       let entry = getEntry();
       if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
         return res.json(entry.data);
@@ -168,10 +170,13 @@ router.get(
       let allowed = false;
       try {
         const ownership = await db.query(
-          `SELECT 1 FROM vehicle_master vm
-           JOIN customer_master cm ON vm.customer_id = cm.customer_id
-           WHERE vm.vehicle_master_id = $1
-             AND ($2::int IS NULL OR cm.user_id = $2)`,
+          `
+          SELECT 1
+          FROM vehicle_master vm
+          JOIN customer_master cm ON vm.customer_id = cm.customer_id
+          WHERE vm.vehicle_master_id = $1
+            AND ($2::int IS NULL OR cm.user_id = $2)
+          `,
           [id, isCustomer ? req.user.user_id : null]
         );
         allowed = ownership.rows.length > 0;
@@ -183,13 +188,11 @@ router.get(
         return res.json({});
       }
 
-      // Check cache again after ownership
       entry = getEntry();
       if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
         return res.json(entry.data);
       }
 
-      // In-flight deduplication
       if (entry?.inflight) {
         const data = await entry.inflight;
         return res.json(data);
@@ -198,32 +201,29 @@ router.get(
       const inflightPromise = (async () => {
         try {
           const result = await db.query(
-            `SELECT * FROM live_values
-             WHERE vehicle_master_id = $1
-             ORDER BY recorded_at DESC
-             LIMIT 1`,
+            `
+            SELECT *
+            FROM live_values
+            WHERE vehicle_master_id = $1
+            ORDER BY recorded_at DESC
+            LIMIT 1
+            `,
             [id]
           );
 
-          if (!result.rows.length) {
-            return {};
-          }
+          if (!result.rows.length) return {};
 
-          // Use the same formatting as real-time updates
           return formatLiveData(result.rows[0]);
-
         } catch (err) {
           logger.error(`Live data fetch error for vehicle ${id}: ${err.message}`);
           return {};
         }
       })();
 
-      // Store inflight promise
       liveCache.set(cacheKey, { ts: now, inflight: inflightPromise });
 
       const data = await inflightPromise;
 
-      // Cache final result
       liveCache.set(cacheKey, { ts: Date.now(), data });
 
       res.json(data);
@@ -234,4 +234,7 @@ router.get(
   }
 );
 
+/* ============================================================
+   EXPORT ROUTER — MUST BE AT THE VERY END
+============================================================ */
 module.exports = router;

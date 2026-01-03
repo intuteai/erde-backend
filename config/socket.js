@@ -4,7 +4,7 @@ const jwt = require("jsonwebtoken");
 const logger = require("../utils/logger");
 const { parseCanDataWithDB } = require("../services/dbParser");
 const db = require("../config/postgres");
-const { formatLiveData } = require("../utils/formatLiveData"); // ← NEW
+const { formatLiveData } = require("../utils/formatLiveData");
 require("dotenv").config();
 
 /**
@@ -15,12 +15,14 @@ const initWebSocket = (server, app) => {
   const wss = new WebSocket.Server({ noServer: true });
   const awsWsPool = new Map();
 
+  /* ============================================================
+     HTTP → WS UPGRADE HANDLING
+  ============================================================ */
   server.on("upgrade", (req, socket, head) => {
     const { url } = req;
 
-    if (url.startsWith("/socket.io")) {
-      return;
-    }
+    // Let Socket.IO handle its own upgrades
+    if (url.startsWith("/socket.io")) return;
 
     const path = url.split("?")[0];
     if (path !== "/aws-ws") {
@@ -30,197 +32,179 @@ const initWebSocket = (server, app) => {
     }
 
     logger.info(`Raw WS upgrade accepted: ${url}`);
-
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit("connection", ws, req);
     });
   });
 
+  /* ============================================================
+     RAW WS CONNECTION
+  ============================================================ */
   wss.on("connection", async (ws, req) => {
     let url;
     try {
       url = new URL(req.url, `http://${req.headers.host}`);
-    } catch (err) {
-      logger.warn(`Invalid URL in WS connection: ${req.url}`);
+    } catch {
       return ws.close(4000, "Invalid URL");
     }
 
     const token = url.searchParams.get("token");
     const deviceId = url.searchParams.get("device_id") || "VCL001";
 
-    if (!token) {
-      logger.warn(`WS connection rejected: Missing token (${deviceId})`);
-      return ws.close(4001, "Token missing");
-    }
+    if (!token) return ws.close(4001, "Token missing");
 
-    let user;
     try {
-      user = jwt.verify(token, process.env.JWT_SECRET);
-      ws.user = user;
+      ws.user = jwt.verify(token, process.env.JWT_SECRET);
       ws.deviceId = deviceId;
-      logger.info(`Raw WS connected: ${user.username} → ${deviceId}`);
-    } catch (err) {
-      logger.warn(`WS connection rejected: Invalid token (${deviceId}) - ${err.message}`);
+      logger.info(`Raw WS connected: ${ws.user.username} → ${deviceId}`);
+    } catch {
       return ws.close(4002, "Invalid token");
     }
 
+    /* ============================================================
+       DEVICE → VEHICLE MAPPING
+    ============================================================ */
     let vehicleMasterId;
     try {
       const res = await db.query(
-        `SELECT vehicle_master_id FROM vehicle_master WHERE vehicle_unique_id = $1`,
+        `SELECT vehicle_master_id
+         FROM vehicle_master
+         WHERE vehicle_unique_id = $1`,
         [deviceId]
       );
 
-      if (!res.rows.length) {
-        logger.error(`Vehicle not found in DB: ${deviceId}`);
-        return ws.close(4004, "Vehicle not found");
-      }
+      if (!res.rows.length) return ws.close(4004, "Vehicle not found");
 
       vehicleMasterId = res.rows[0].vehicle_master_id;
       ws.vehicleMasterId = vehicleMasterId;
     } catch (err) {
-      logger.error(`Database error during WS connection: ${err.message}`);
+      logger.error(`DB error during WS connect: ${err.message}`);
       return ws.close(5000, "Server error");
     }
 
+    /* ============================================================
+       AWS WS CONNECTION (ONE PER DEVICE)
+    ============================================================ */
     let awsWs = awsWsPool.get(deviceId);
 
     if (!awsWs || awsWs.readyState !== WebSocket.OPEN) {
-      try {
-        awsWs = new WebSocket(`${process.env.AWS_WS_URL}?device_id=${deviceId}`, {
+      awsWs = new WebSocket(
+        `${process.env.AWS_WS_URL}?device_id=${deviceId}`,
+        {
           headers: {
             Authorization: `Bearer ${process.env.AWS_API_KEY}`,
           },
-          handshakeTimeout: 10000,
-        });
+          handshakeTimeout: 15000,
+        }
+      );
 
-        awsWs.on("open", () => {
-          awsWs.send(JSON.stringify({ action: "subscribe", device_id: deviceId }));
-          logger.info(`AWS WS connected and subscribed: ${deviceId}`);
-        });
+      awsWs.on("open", () => {
+        awsWs.send(JSON.stringify({ action: "subscribe", device_id: deviceId }));
+        logger.info(`AWS WS connected & subscribed: ${deviceId}`);
+      });
 
-        awsWs.on("message", async (data) => {
-          try {
-            const raw = JSON.parse(data.toString());
-            const payloadHex = raw.payload || raw.items?.[0]?.payload;
-            if (!payloadHex) return;
+      /* ============================================================
+         AWS MESSAGE HANDLER
+      ============================================================ */
+      awsWs.on("message", async (data) => {
+        try {
+          const raw = JSON.parse(data.toString());
+          const payloadHex = raw.payload || raw.items?.[0]?.payload;
+          if (!payloadHex) return;
 
-            const parsed = await parseCanDataWithDB(payloadHex, vehicleMasterId);
+          const parsed = await parseCanDataWithDB(payloadHex, vehicleMasterId);
 
-            // === 1. Save live values to DB ===
-            const keys = Object.keys(parsed).filter(
-              (k) => !["timestamp", "fault_code", "fault_description"].includes(k)
+          /* ============================================================
+             DB UPSERT (FIELD-PRESERVING)
+          ============================================================ */
+          const keys = Object.keys(parsed).filter(
+            (k) => !["timestamp", "fault_code", "fault_description"].includes(k)
+          );
+
+          if (keys.length) {
+            const columns = ["vehicle_master_id", "recorded_at", ...keys];
+            const values = [vehicleMasterId, new Date(), ...keys.map((k) => parsed[k])];
+            const placeholders = values.map((_, i) => `$${i + 1}`).join(", ");
+
+            const updates = keys
+              .map((k) => `${k} = COALESCE(EXCLUDED.${k}, live_values.${k})`)
+              .join(", ");
+
+            await db.query(
+              `
+              INSERT INTO live_values (${columns.join(", ")})
+              VALUES (${placeholders})
+              ON CONFLICT (vehicle_master_id)
+              DO UPDATE SET
+                recorded_at = EXCLUDED.recorded_at,
+                ${updates}
+              `,
+              values
             );
-
-            if (keys.length > 0) {
-              const columns = ["vehicle_master_id", "recorded_at", ...keys].join(", ");
-              const values = [vehicleMasterId, new Date(), ...keys.map((k) => parsed[k])];
-              const placeholders = values.map((_, i) => `$${i + 1}`).join(", ");
-
-              await db.query(
-                `INSERT INTO live_values (${columns}) VALUES (${placeholders})
-                 ON CONFLICT (vehicle_master_id) DO UPDATE SET
-                 ${keys.map((k) => `${k} = EXCLUDED.${k}`).join(", ")}`,
-                values
-              );
-            }
-
-            // === 2. Save DTC if present ===
-            if (parsed.fault_code) {
-              await db.query(
-                `INSERT INTO dtc_events (vehicle_master_id, code, description, recorded_at)
-                 VALUES ($1, $2, $3, NOW()) ON CONFLICT DO NOTHING`,
-                [vehicleMasterId, parsed.fault_code, parsed.fault_description || "Unknown"]
-              );
-            }
-
-            // === 3. Broadcast to raw WS clients (optional – keep if you have raw clients) ===
-            const rawBroadcast = { ...parsed, timestamp: Date.now(), deviceId };
-            wss.clients.forEach((client) => {
-              if (client.readyState === WebSocket.OPEN && client.deviceId === deviceId) {
-                try {
-                  client.send(JSON.stringify(rawBroadcast));
-                } catch (e) {
-                  logger.warn(`Failed to send to raw client (${deviceId}): ${e.message}`);
-                }
-              }
-            });
-
-            // === 4. Broadcast FORMATTED data to Socket.IO frontend clients ===
-            const io = app.get("io");
-            if (io) {
-              try {
-                // Read the latest row from DB (ensures we have full persisted data)
-                const latestRes = await db.query(
-                  `SELECT * FROM live_values 
-                   WHERE vehicle_master_id = $1 
-                   ORDER BY recorded_at DESC 
-                   LIMIT 1`,
-                  [vehicleMasterId]
-                );
-
-                if (latestRes.rows.length > 0) {
-                  const formatted = formatLiveData(latestRes.rows[0]);
-                  const room = `vehicle:${vehicleMasterId}`;
-                  io.to(room).emit("live_update", formatted);
-                  logger.info(`Broadcasted formatted live_update to Socket.IO room: ${room}`);
-                }
-              } catch (err) {
-                logger.error(`Error formatting or broadcasting live data: ${err.message}`);
-              }
-            } else {
-              logger.warn("Socket.IO instance not available for broadcasting");
-            }
-
-            logger.info(`Live data processed & broadcasted: ${deviceId}`);
-          } catch (err) {
-            logger.error(`Error processing AWS message (${deviceId}): ${err.message}`);
           }
-        });
 
-        awsWs.on("close", (code, reason) => {
-          logger.warn(`AWS WS closed (${deviceId}) - Code: ${code}, Reason: ${reason.toString()}`);
-          awsWsPool.delete(deviceId);
-        });
+          /* ============================================================
+             DTC LOGGING
+          ============================================================ */
+          if (parsed.fault_code) {
+            await db.query(
+              `
+              INSERT INTO dtc_events (vehicle_master_id, code, description, recorded_at)
+              VALUES ($1, $2, $3, NOW())
+              ON CONFLICT DO NOTHING
+              `,
+              [
+                vehicleMasterId,
+                parsed.fault_code,
+                parsed.fault_description || "Unknown",
+              ]
+            );
+          }
 
-        awsWs.on("error", (err) => {
-          logger.error(`AWS WS error (${deviceId}): ${err.message}`);
-          awsWsPool.delete(deviceId);
-        });
+          /* ============================================================
+             SOCKET.IO BROADCAST (AUTHORITATIVE FROM DB)
+          ============================================================ */
+          const io = app.get("io");
+          if (!io) return;
 
-        awsWsPool.set(deviceId, awsWs);
-      } catch (err) {
-        logger.error(`Failed to create AWS WS (${deviceId}): ${err.message}`);
-        return ws.close(5001, "Failed to connect to data source");
-      }
+          const latest = await db.query(
+            `
+            SELECT *
+            FROM live_values
+            WHERE vehicle_master_id = $1
+            ORDER BY recorded_at DESC
+            LIMIT 1
+            `,
+            [vehicleMasterId]
+          );
+
+          if (latest.rows.length) {
+            const formatted = formatLiveData(latest.rows[0]);
+            io.to(`vehicle:${vehicleMasterId}`).emit("live_update", formatted);
+          }
+        } catch (err) {
+          logger.error(`AWS message processing failed: ${err.message}`);
+        }
+      });
+
+      awsWs.on("close", () => awsWsPool.delete(deviceId));
+      awsWs.on("error", () => awsWsPool.delete(deviceId));
+
+      awsWsPool.set(deviceId, awsWs);
     }
 
-    ws.on("message", (msg) => {
-      if (awsWs?.readyState === WebSocket.OPEN) {
-        try {
-          awsWs.send(msg);
-        } catch (err) {
-          logger.error(`Failed to forward to AWS (${deviceId}): ${err.message}`);
-        }
-      }
-    });
-
-    ws.on("close", (code) => {
-      logger.info(`Raw WS disconnected: ${ws.user?.username || "unknown"} (${deviceId}) - Code: ${code}`);
-
-      const hasActiveClients = [...wss.clients].some(
+    /* ============================================================
+       CLEANUP
+    ============================================================ */
+    ws.on("close", () => {
+      const stillActive = [...wss.clients].some(
         (c) => c.readyState === WebSocket.OPEN && c.deviceId === deviceId
       );
 
-      if (!hasActiveClients && awsWs) {
+      if (!stillActive && awsWs) {
         awsWs.close();
         awsWsPool.delete(deviceId);
-        logger.info(`AWS WS closed (no clients): ${deviceId}`);
       }
-    });
-
-    ws.on("error", (err) => {
-      logger.warn(`Raw WS client error (${deviceId}): ${err.message}`);
     });
   });
 
