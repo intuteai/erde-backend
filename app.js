@@ -3,13 +3,15 @@ const express = require('express');
 const cors = require('cors');
 const logger = require('./utils/logger');
 
-/* ROUTES */
+/* =========================
+   ROUTES
+========================= */
 const authRoutes             = require('./routes/auth.js');
 const customerRoutes         = require('./routes/customer.js');
 const vehicleTypeRoutes      = require('./routes/vehicleType.js');
 const vehicleCategoryRoutes  = require('./routes/vehicleCategory.js');
 const vehicleMasterRoutes    = require('./routes/vehicle-master.js');
-const vehicleRoutes          = require('./routes/vehicle.js');
+const vehicleRoutes          = require('./routes/vehicle.js');  // ← Now includes /stream !
 const batteryRoutes          = require('./routes/battery.js');
 const motorRoutes            = require('./routes/motor.js');
 const faultsRoutes           = require('./routes/faults.js');
@@ -19,7 +21,9 @@ const databaseLogsRoutes     = require('./routes/databaseLogs.js');
 const vcuRoutes              = require('./routes/vcu.js');
 const hmiRoutes              = require('./routes/hmi.js');
 
-/* RATE LIMITERS */
+/* =========================
+   RATE LIMITERS
+========================= */
 const { generalLimiter } = require('./middleware/rateLimiter');
 
 const app = express();
@@ -58,7 +62,6 @@ app.use(express.urlencoded({ extended: true }));
 ========================= */
 app.use('/api/auth', authRoutes);
 
-// Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
@@ -69,20 +72,17 @@ app.get('/health', (req, res) => {
 app.use('/api/customers',          generalLimiter, customerRoutes);
 app.use('/api/vehicle-types',      generalLimiter, vehicleTypeRoutes);
 app.use('/api/vehicle-categories', generalLimiter, vehicleCategoryRoutes);
-
-/* 🔥 IMPORTANT FIX — DUAL MOUNT 🔥 */
-app.use('/api/vehicle-master', generalLimiter, vehicleMasterRoutes);
-app.use('/vehicle-master',     generalLimiter, vehicleMasterRoutes); // ← added
-
-app.use('/api/vehicles',       generalLimiter, vehicleRoutes);
-app.use('/api/battery',        generalLimiter, batteryRoutes);
-app.use('/api/motor',          generalLimiter, motorRoutes);
-app.use('/api/faults',         generalLimiter, faultsRoutes);
-app.use('/api/database-logs',  generalLimiter, databaseLogsRoutes);
-app.use('/api/config',         generalLimiter, configRoutes);
-app.use('/api/telemetry',      generalLimiter, telemetryRoutes);
-app.use('/api/vcu',            generalLimiter, vcuRoutes);
-app.use('/api/hmi',            generalLimiter, hmiRoutes);
+app.use('/api/vehicle-master',     generalLimiter, vehicleMasterRoutes);
+app.use('/vehicle-master',         generalLimiter, vehicleMasterRoutes); // legacy
+app.use('/api/vehicles',           generalLimiter, vehicleRoutes);     // ← SSE is here now!
+app.use('/api/battery',            generalLimiter, batteryRoutes);
+app.use('/api/motor',              generalLimiter, motorRoutes);
+app.use('/api/faults',             generalLimiter, faultsRoutes);
+app.use('/api/database-logs',      generalLimiter, databaseLogsRoutes);
+app.use('/api/config',             generalLimiter, configRoutes);
+app.use('/api/telemetry',          generalLimiter, telemetryRoutes);
+app.use('/api/vcu',                generalLimiter, vcuRoutes);
+app.use('/api/hmi',                generalLimiter, hmiRoutes);
 
 /* =========================
    404 HANDLER
@@ -97,10 +97,9 @@ app.use('*', (req, res) => {
 app.use((err, req, res, next) => {
   logger.error(`Unhandled error: ${err.message}`, { stack: err.stack });
   res.status(err.status || 500).json({
-    error:
-      process.env.NODE_ENV === 'production'
-        ? 'Internal server error'
-        : err.message,
+    error: process.env.NODE_ENV === 'production'
+      ? 'Internal server error'
+      : err.message,
   });
 });
 

@@ -7,22 +7,14 @@ const { generalLimiter, liveRateLimiter } = require('../middleware/rateLimiter')
 const logger = require('../utils/logger');
 const { formatLiveData } = require('../utils/formatLiveData');
 
+// ✅ Import shared cache from dedicated service
+const {
+  liveCache,
+  cleanupLiveCache,
+  LIVE_CACHE_TTL_MS,
+} = require('../services/liveCache');
+
 const router = express.Router();
-
-/* ============================================================
-   IN-MEMORY LIVE CACHE (STAMPEDE-PROTECTED, 1.5s TTL)
-============================================================ */
-const LIVE_CACHE_TTL_MS = 1500;
-const liveCache = new Map();
-
-const cleanupLiveCache = () => {
-  const now = Date.now();
-  for (const [key, entry] of liveCache.entries()) {
-    if (!entry?.ts || now - entry.ts > LIVE_CACHE_TTL_MS) {
-      liveCache.delete(key);
-    }
-  }
-};
 
 /* ============================================================
    GET /api/vehicles — List accessible vehicles
@@ -158,10 +150,9 @@ router.get(
     const isCustomer = req.user.role === 'customer';
     const cacheKey = `vehicle_live:${id}`;
     const now = Date.now();
-    const getEntry = () => liveCache.get(cacheKey);
 
     try {
-      let entry = getEntry();
+      let entry = liveCache.get(cacheKey);
       if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
         return res.json(entry.data);
       }
@@ -188,7 +179,7 @@ router.get(
         return res.json({});
       }
 
-      entry = getEntry();
+      entry = liveCache.get(cacheKey);
       if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
         return res.json(entry.data);
       }
@@ -223,7 +214,6 @@ router.get(
       liveCache.set(cacheKey, { ts: now, inflight: inflightPromise });
 
       const data = await inflightPromise;
-
       liveCache.set(cacheKey, { ts: Date.now(), data });
 
       res.json(data);
@@ -235,6 +225,128 @@ router.get(
 );
 
 /* ============================================================
-   EXPORT ROUTER — MUST BE AT THE VERY END
+   GET /api/vehicles/:id/stream — SSE LIVE STREAM
+============================================================ */
+router.get(
+  '/:id/stream',
+  authenticateToken,
+  checkPermission('live_view', 'read'),
+  liveRateLimiter,
+  async (req, res) => {
+    const { id } = req.params;
+    const user = req.user;
+    const isCustomer = user.role === 'customer';
+
+    // Ownership Check
+    try {
+      const ownership = await db.query(
+        `
+        SELECT 1
+        FROM vehicle_master vm
+        JOIN customer_master cm ON vm.customer_id = cm.customer_id
+        WHERE vm.vehicle_master_id = $1
+          AND ($2::int IS NULL OR cm.user_id = $2)
+        `,
+        [id, isCustomer ? user.user_id : null]
+      );
+
+      if (ownership.rows.length === 0) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+    } catch (err) {
+      logger.warn(`SSE ownership check failed for vehicle ${id}: ${err.message}`);
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+    res.flushHeaders();
+
+    logger.info(`🟢 SSE connected → user=${user.email}, vehicle=${id}`);
+
+    const cacheKey = `vehicle_live:${id}`;
+
+    cleanupLiveCache();
+    const cached = liveCache.get(cacheKey);
+    if (cached?.data) {
+      res.write(`data: ${JSON.stringify(cached.data)}\n\n`);
+    }
+
+    const interval = setInterval(async () => {
+      try {
+        cleanupLiveCache();
+
+        const entry = liveCache.get(cacheKey);
+        const now = Date.now();
+
+        if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
+          res.write(`data: ${JSON.stringify(entry.data)}\n\n`);
+          return;
+        }
+
+        if (!entry?.inflight) {
+          const inflightPromise = (async () => {
+            try {
+              const result = await db.query(
+                `
+                SELECT *
+                FROM live_values
+                WHERE vehicle_master_id = $1
+                ORDER BY recorded_at DESC
+                LIMIT 1
+                `,
+                [id]
+              );
+
+              if (!result.rows.length) return {};
+
+              return formatLiveData(result.rows[0]);
+            } catch (err) {
+              logger.error(`SSE fetch error for vehicle ${id}: ${err.message}`);
+              return {};
+            }
+          })();
+
+          liveCache.set(cacheKey, { ts: now, inflight: inflightPromise });
+
+          const data = await inflightPromise;
+          liveCache.set(cacheKey, { ts: Date.now(), data });
+
+          if (!res.writableEnded) {
+            res.write(`data: ${JSON.stringify(data)}\n\n`);
+          }
+          return;
+        }
+
+        try {
+          const data = await entry.inflight;
+          if (!res.writableEnded) {
+            res.write(`data: ${JSON.stringify(data)}\n\n`);
+          }
+        } catch {}
+      } catch (err) {
+        logger.error(`SSE interval error for vehicle ${id}: ${err.message}`);
+      }
+    }, 1000);
+
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write(':\n\n');
+      }
+    }, 15000);
+
+    req.on('close', () => {
+      clearInterval(interval);
+      clearInterval(heartbeat);
+      logger.info(`🔴 SSE disconnected → vehicle=${id}`);
+    });
+  }
+);
+
+/* ============================================================
+   EXPORT ONLY ROUTER
 ============================================================ */
 module.exports = router;
