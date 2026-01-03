@@ -1,29 +1,18 @@
 // server.js
 const http = require("http");
-const { Server } = require("socket.io");
 const app = require("./app");
 const logger = require("./utils/logger");
 
 /* =========================
-   TRUST PROXY (IMPORTANT)
+   TRUST PROXY
 ========================= */
-/**
- * Required when running behind:
- * - AWS ALB / ELB
- * - NGINX
- * - Cloudflare
- *
- * Ensures req.ip is the REAL client IP
- * (critical for rate limiting)
- */
 app.set("trust proxy", true);
 
 /* =========================
    INIT MODULES
 ========================= */
-const initSocketIO = require("./socket.io");          // Socket.IO → React frontend
-const initRawWebSocket = require("./config/socket");  // Raw WS (AWS / CAN → Socket.IO)
-const telemetryService = require("./services/telemetryService");
+// Raw WS from AWS → DB → cache invalidation → SSE clients get fresh data
+const initRawWebSocket = require("./config/socket");
 
 const PORT = process.env.SERVER_PORT || 5000;
 
@@ -33,46 +22,10 @@ const PORT = process.env.SERVER_PORT || 5000;
 const server = http.createServer(app);
 
 /* =========================
-   SOCKET.IO SERVER
+   REGISTER REALTIME LAYERS
 ========================= */
-const io = new Server(server, {
-  cors: {
-    origin: [
-      "http://localhost:3000",
-      "http://localhost:5173",
-      "https://analytics.erdeenergy.in",
-    ],
-    credentials: true,
-  },
-
-  // Helps with reconnects & unstable networks
-  pingTimeout: 20000,
-  pingInterval: 25000,
-});
-
-/* =========================
-   MAKE SOCKET.IO GLOBALLY ACCESSIBLE
-========================= */
-/**
- * Critical:
- * - Express routes
- * - Raw WebSocket server
- * - Telemetry services
- * all need access to io
- */
-app.set("io", io);
-telemetryService.setSocketIO(io);
-
-/* =========================
-   REGISTER REALTIME LAYERS — CORRECT ORDER!
-========================= */
-
-// 1️⃣ Initialize Socket.IO for frontend clients FIRST
-initSocketIO(io);
-
-// 2️⃣ Initialize Raw WebSocket bridge SECOND
-//     → Now it can safely access app.get("io")
-initRawWebSocket(server, app);
+// Only pass server — app is no longer needed (we removed Socket.IO dependency)
+initRawWebSocket(server);
 
 /* =========================
    START SERVER
@@ -82,7 +35,7 @@ server.listen(PORT, "0.0.0.0", () => {
 });
 
 /* =========================
-   GRACEFUL SHUTDOWN (OPTIONAL BUT RECOMMENDED)
+   GRACEFUL SHUTDOWN
 ========================= */
 process.on("SIGTERM", () => {
   logger.warn("SIGTERM received. Shutting down gracefully...");

@@ -7,26 +7,21 @@ const db = require("../config/postgres");
 const { formatLiveData } = require("../utils/formatLiveData");
 require("dotenv").config();
 
-/**
- * Initialize Raw WebSocket Server for /aws-ws
- * Bridges parsed CAN data → DB → formatted broadcast to Socket.IO frontend
- */
-const initWebSocket = (server, app) => {
+// ✅ Import shared cache from dedicated service
+const { liveCache, cleanupLiveCache } = require("../services/liveCache");
+
+const initWebSocket = (server) => {
   const wss = new WebSocket.Server({ noServer: true });
   const awsWsPool = new Map();
 
-  /* ============================================================
-     HTTP → WS UPGRADE HANDLING
-  ============================================================ */
   server.on("upgrade", (req, socket, head) => {
     const { url } = req;
 
-    // Let Socket.IO handle its own upgrades
     if (url.startsWith("/socket.io")) return;
 
     const path = url.split("?")[0];
     if (path !== "/aws-ws") {
-      logger.warn(`Rejected invalid WS upgrade attempt: ${url}`);
+      logger.warn(`Rejected invalid WS upgrade: ${url}`);
       socket.destroy();
       return;
     }
@@ -37,9 +32,6 @@ const initWebSocket = (server, app) => {
     });
   });
 
-  /* ============================================================
-     RAW WS CONNECTION
-  ============================================================ */
   wss.on("connection", async (ws, req) => {
     let url;
     try {
@@ -56,20 +48,15 @@ const initWebSocket = (server, app) => {
     try {
       ws.user = jwt.verify(token, process.env.JWT_SECRET);
       ws.deviceId = deviceId;
-      logger.info(`Raw WS connected: ${ws.user.username} → ${deviceId}`);
+      logger.info(`Raw WS connected: ${ws.user.username || "device"} → ${deviceId}`);
     } catch {
       return ws.close(4002, "Invalid token");
     }
 
-    /* ============================================================
-       DEVICE → VEHICLE MAPPING
-    ============================================================ */
     let vehicleMasterId;
     try {
       const res = await db.query(
-        `SELECT vehicle_master_id
-         FROM vehicle_master
-         WHERE vehicle_unique_id = $1`,
+        `SELECT vehicle_master_id FROM vehicle_master WHERE vehicle_unique_id = $1`,
         [deviceId]
       );
 
@@ -82,30 +69,21 @@ const initWebSocket = (server, app) => {
       return ws.close(5000, "Server error");
     }
 
-    /* ============================================================
-       AWS WS CONNECTION (ONE PER DEVICE)
-    ============================================================ */
     let awsWs = awsWsPool.get(deviceId);
 
     if (!awsWs || awsWs.readyState !== WebSocket.OPEN) {
-      awsWs = new WebSocket(
-        `${process.env.AWS_WS_URL}?device_id=${deviceId}`,
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.AWS_API_KEY}`,
-          },
-          handshakeTimeout: 15000,
-        }
-      );
+      awsWs = new WebSocket(`${process.env.AWS_WS_URL}?device_id=${deviceId}`, {
+        headers: {
+          Authorization: `Bearer ${process.env.AWS_API_KEY}`,
+        },
+        handshakeTimeout: 15000,
+      });
 
       awsWs.on("open", () => {
         awsWs.send(JSON.stringify({ action: "subscribe", device_id: deviceId }));
         logger.info(`AWS WS connected & subscribed: ${deviceId}`);
       });
 
-      /* ============================================================
-         AWS MESSAGE HANDLER
-      ============================================================ */
       awsWs.on("message", async (data) => {
         try {
           const raw = JSON.parse(data.toString());
@@ -114,9 +92,6 @@ const initWebSocket = (server, app) => {
 
           const parsed = await parseCanDataWithDB(payloadHex, vehicleMasterId);
 
-          /* ============================================================
-             DB UPSERT (FIELD-PRESERVING)
-          ============================================================ */
           const keys = Object.keys(parsed).filter(
             (k) => !["timestamp", "fault_code", "fault_description"].includes(k)
           );
@@ -126,9 +101,7 @@ const initWebSocket = (server, app) => {
             const values = [vehicleMasterId, new Date(), ...keys.map((k) => parsed[k])];
             const placeholders = values.map((_, i) => `$${i + 1}`).join(", ");
 
-            const updates = keys
-              .map((k) => `${k} = COALESCE(EXCLUDED.${k}, live_values.${k})`)
-              .join(", ");
+            const updates = keys.map(k => `${k} = EXCLUDED.${k}`).join(", ");
 
             await db.query(
               `
@@ -143,9 +116,6 @@ const initWebSocket = (server, app) => {
             );
           }
 
-          /* ============================================================
-             DTC LOGGING
-          ============================================================ */
           if (parsed.fault_code) {
             await db.query(
               `
@@ -153,57 +123,42 @@ const initWebSocket = (server, app) => {
               VALUES ($1, $2, $3, NOW())
               ON CONFLICT DO NOTHING
               `,
-              [
-                vehicleMasterId,
-                parsed.fault_code,
-                parsed.fault_description || "Unknown",
-              ]
+              [vehicleMasterId, parsed.fault_code, parsed.fault_description || "Unknown"]
             );
           }
 
-          /* ============================================================
-             SOCKET.IO BROADCAST (AUTHORITATIVE FROM DB)
-          ============================================================ */
-          const io = app.get("io");
-          if (!io) return;
+          // Invalidate cache → SSE clients get fresh data
+          const cacheKey = `vehicle_live:${vehicleMasterId}`;
+          liveCache.delete(cacheKey);
+          cleanupLiveCache();
 
-          const latest = await db.query(
-            `
-            SELECT *
-            FROM live_values
-            WHERE vehicle_master_id = $1
-            ORDER BY recorded_at DESC
-            LIMIT 1
-            `,
-            [vehicleMasterId]
-          );
-
-          if (latest.rows.length) {
-            const formatted = formatLiveData(latest.rows[0]);
-            io.to(`vehicle:${vehicleMasterId}`).emit("live_update", formatted);
-          }
+          logger.info(`Live data updated & cache invalidated for vehicle ${vehicleMasterId}`);
         } catch (err) {
           logger.error(`AWS message processing failed: ${err.message}`);
         }
       });
 
       awsWs.on("close", () => awsWsPool.delete(deviceId));
-      awsWs.on("error", () => awsWsPool.delete(deviceId));
+      awsWs.on("error", (err) => {
+        logger.error(`AWS WS error for ${deviceId}: ${err.message}`);
+        awsWsPool.delete(deviceId);
+      });
 
       awsWsPool.set(deviceId, awsWs);
     }
 
-    /* ============================================================
-       CLEANUP
-    ============================================================ */
     ws.on("close", () => {
       const stillActive = [...wss.clients].some(
         (c) => c.readyState === WebSocket.OPEN && c.deviceId === deviceId
       );
 
-      if (!stillActive && awsWs) {
-        awsWs.close();
-        awsWsPool.delete(deviceId);
+      if (!stillActive) {
+        const awsWs = awsWsPool.get(deviceId);
+        if (awsWs) {
+          awsWs.close();
+          awsWsPool.delete(deviceId);
+          logger.info(`AWS WS closed (no clients): ${deviceId}`);
+        }
       }
     });
   });
