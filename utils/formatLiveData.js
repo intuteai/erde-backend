@@ -30,6 +30,9 @@ function formatLiveData(row) {
   const r = row;
 
   const data = {
+    // === IMPORTANT: Add recorded_at here ===
+    recorded_at: r.recorded_at ? r.recorded_at.toISOString() : null,
+
     soc_percent: toNumber(r.soc_percent),
     battery_status: r.battery_status ?? null,
     stack_voltage_v: toNumber(r.stack_voltage_v),
@@ -46,9 +49,10 @@ function formatLiveData(row) {
     motor_rotation_dir: r.motor_rotation_dir ?? null,
     ac_current_a: toNumber(r.motor_ac_current_a),
     motor_ac_voltage_v: toNumber(r.motor_ac_voltage_v),
-    mcu_enable_state: r.mcu_enable_state
-      ? r.mcu_enable_state.toLowerCase().trim() === 'enabled'
-      : null,
+
+    // Correctly preserves "Enabled" / "Disabled" string
+    mcu_enable_state: r.mcu_enable_state?.trim() || null,
+
     motor_temp_c: toNumber(r.motor_temp_c),
     mcu_temp_c: toNumber(r.mcu_temp_c),
 
