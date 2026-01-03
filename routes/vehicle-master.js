@@ -21,7 +21,7 @@ const getVehicleStatus = (lastSeen) => {
 
 /* ============================================================
    1. GET /api/vehicle-master/admin-summary
-   👉 Ordered by vehicle_master_id ASC → ID 1 on top, matches DB natural order
+   → Full fleet summary for Admin Dashboard (with live stats)
 ============================================================ */
 router.get(
   '/admin-summary',
@@ -33,33 +33,30 @@ router.get(
         SELECT
           vm.vehicle_master_id,
           vm.vehicle_reg_no,
-          cm.company_name,
+          cm.company_name AS customer,
           vt.make AS vehicle_make,
           vt.model AS vehicle_model,
-          vt.capacity_tonne,
+          vt.capacity_tonne AS capacity,
           lv.recorded_at AS last_seen,
 
-          -- Total running hours in decimal (e.g., 137.45)
           CASE 
             WHEN lv.total_running_hrs IS NOT NULL 
             THEN ROUND(EXTRACT(EPOCH FROM lv.total_running_hrs) / 3600.0, 2)
             ELSE NULL 
-          END AS total_running_hours,
+          END AS total_hours,
 
-          -- Total kWh consumed, rounded safely
-          ROUND(lv.total_kwh_consumed, 2) AS total_kwh_consumed,
+          ROUND(lv.total_kwh_consumed, 2) AS total_kwh,
 
-          -- Avg kWh/Hr: ONLY if vehicle has run for at least 1 hour
           CASE
             WHEN lv.total_running_hrs IS NOT NULL
-             AND EXTRACT(EPOCH FROM lv.total_running_hrs) >= 3600  -- ≥ 1 hour in seconds
+             AND EXTRACT(EPOCH FROM lv.total_running_hrs) >= 3600
             THEN ROUND(
               lv.total_kwh_consumed /
               (EXTRACT(EPOCH FROM lv.total_running_hrs) / 3600),
               2
             )
             ELSE NULL
-          END AS avg_kwh_per_hour
+          END AS avg_kwh
 
         FROM vehicle_master vm
         JOIN customer_master cm ON vm.customer_id = cm.customer_id
@@ -74,18 +71,18 @@ router.get(
           ORDER BY recorded_at DESC
           LIMIT 1
         ) lv ON true
-        ORDER BY vm.vehicle_master_id ASC  -- ← Changed to ASC: ID 1 first, then 2, etc.
+        ORDER BY vm.vehicle_master_id ASC
       `);
 
       const data = result.rows.map(row => ({
         vehicle_master_id: row.vehicle_master_id,
-        vehicle_no: row.vehicle_reg_no || '-',
-        customer: row.company_name || '-',
-        vehicle_type: `${row.vehicle_make || ''} ${row.vehicle_model || ''}`.trim() || '-',
-        capacity: row.capacity_tonne ?? '-',
-        total_hours: row.total_running_hours,
-        total_kwh: row.total_kwh_consumed,
-        avg_kwh: row.avg_kwh_per_hour,
+        vehicle_no: row.vehicle_reg_no || '—',
+        customer: row.customer || '—',
+        vehicle_type: `${row.vehicle_make || ''} ${row.vehicle_model || ''}`.trim() || '—',
+        capacity: row.capacity ?? '—',
+        total_hours: row.total_hours,
+        total_kwh: row.total_kwh,
+        avg_kwh: row.avg_kwh,
         status: getVehicleStatus(row.last_seen),
         last_seen: row.last_seen
       }));
@@ -99,7 +96,104 @@ router.get(
 );
 
 /* ============================================================
-   2. GET /api/vehicle-master (Admin → all detailed vehicles)
+   2. GET /api/vehicle-master/my
+   → Customer's own vehicles WITH live telemetry + capacity
+   → Now ordered by vehicle_master_id ASC to match Admin Dashboard
+============================================================ */
+router.get(
+  '/my',
+  authenticateToken,
+  checkPermission('vehicle_master', 'read'),
+  async (req, res) => {
+    try {
+      // Get customer_id from logged-in user
+      const custRes = await db.query(
+        `SELECT customer_id FROM customer_master WHERE user_id = $1`,
+        [req.user.user_id]
+      );
+
+      if (!custRes.rows.length) {
+        return res.status(404).json({ error: 'Customer profile not found' });
+      }
+
+      const customerId = custRes.rows[0].customer_id;
+
+      const result = await db.query(`
+        SELECT
+          vm.vehicle_master_id,
+          vm.vehicle_reg_no,
+          vm.date_of_deployment,
+
+          vt.make AS vehicle_make,
+          vt.model AS vehicle_model,
+          vt.capacity_tonne AS capacity,
+
+          vm.vcu_make_model,
+          vm.hmi_make_model,
+
+          lv.recorded_at AS last_seen,
+
+          CASE 
+            WHEN lv.total_running_hrs IS NOT NULL 
+            THEN ROUND(EXTRACT(EPOCH FROM lv.total_running_hrs) / 3600.0, 2)
+            ELSE NULL 
+          END AS total_hours,
+
+          ROUND(lv.total_kwh_consumed, 2) AS total_kwh,
+
+          CASE
+            WHEN lv.total_running_hrs IS NOT NULL
+             AND EXTRACT(EPOCH FROM lv.total_running_hrs) >= 3600
+            THEN ROUND(
+              lv.total_kwh_consumed /
+              (EXTRACT(EPOCH FROM lv.total_running_hrs) / 3600),
+              2
+            )
+            ELSE NULL
+          END AS avg_kwh
+
+        FROM vehicle_master vm
+        JOIN vehicle_type_master vt ON vm.vtype_id = vt.vtype_id
+        LEFT JOIN LATERAL (
+          SELECT
+            recorded_at,
+            total_running_hrs,
+            total_kwh_consumed
+          FROM live_values
+          WHERE vehicle_master_id = vm.vehicle_master_id
+          ORDER BY recorded_at DESC
+          LIMIT 1
+        ) lv ON true
+        WHERE vm.customer_id = $1
+        ORDER BY vm.vehicle_master_id ASC   -- ← FIXED: Now ASC to match Admin
+      `, [customerId]);
+
+      const data = result.rows.map(row => ({
+        vehicle_master_id: row.vehicle_master_id,
+        vehicle_reg_no: row.vehicle_reg_no || '—',
+        vehicle_make: row.vehicle_make || '',
+        vehicle_model: row.vehicle_model || '',
+        capacity: row.capacity ?? '—',
+        vcu_make_model: row.vcu_make_model,
+        hmi_make_model: row.hmi_make_model,
+        date_of_deployment: row.date_of_deployment,
+        total_hours: row.total_hours,
+        total_kwh: row.total_kwh,
+        avg_kwh: row.avg_kwh,
+        status: getVehicleStatus(row.last_seen),
+        last_seen: row.last_seen
+      }));
+
+      res.json(data);
+    } catch (err) {
+      logger.error('GET /vehicle-master/my error:', err.message);
+      res.status(500).json({ error: 'Server error' });
+    }
+  }
+);
+
+/* ============================================================
+   3. GET /api/vehicle-master (Admin → all detailed vehicles)
 ============================================================ */
 router.get(
   '/',
@@ -150,56 +244,6 @@ router.get(
       res.json(result.rows);
     } catch (err) {
       logger.error('GET /vehicle-master error:', err.message);
-      res.status(500).json({ error: 'Server error' });
-    }
-  }
-);
-
-/* ============================================================
-   3. GET /api/vehicle-master/my (Customer's own vehicles)
-============================================================ */
-router.get(
-  '/my',
-  authenticateToken,
-  checkPermission('vehicle_master', 'read'),
-  async (req, res) => {
-    try {
-      const custRes = await db.query(
-        `SELECT customer_id FROM customer_master WHERE user_id = $1`,
-        [req.user.user_id]
-      );
-
-      if (!custRes.rows.length) {
-        return res.status(404).json({ error: 'Customer profile not found' });
-      }
-
-      const customerId = custRes.rows[0].customer_id;
-
-      const result = await db.query(`
-        SELECT
-          vm.vehicle_master_id,
-          vm.vehicle_unique_id,
-          vm.vehicle_reg_no,
-          vm.vcu_id,
-          vm.hmi_id,
-          vm.motor_unique_id,
-          vm.controller_unique_id,
-          vm.battery_unique_id,
-          vm.date_of_deployment,
-
-          vt.make AS vehicle_make,
-          vt.model AS vehicle_model,
-          cm.company_name
-        FROM vehicle_master vm
-        JOIN vehicle_type_master vt ON vm.vtype_id = vt.vtype_id
-        JOIN customer_master cm ON vm.customer_id = cm.customer_id
-        WHERE vm.customer_id = $1
-        ORDER BY vm.vehicle_master_id DESC
-      `, [customerId]);
-
-      res.json(result.rows);
-    } catch (err) {
-      logger.error('GET /vehicle-master/my error:', err.message);
       res.status(500).json({ error: 'Server error' });
     }
   }
@@ -351,7 +395,7 @@ router.put(
     } catch (err) {
       logger.error('PUT /vehicle-master/:id error:', err.message);
       if (err.code === '23505') {
-        return res.status(409).json({ error: 'Unique constraint violated (e.g., duplicate Unique ID)' });
+        return res.status(409).json({ error: 'Unique constraint violated' });
       }
       res.status(500).json({ error: 'Update failed' });
     }
