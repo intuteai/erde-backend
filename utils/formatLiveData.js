@@ -14,6 +14,7 @@ const intervalToHours = (interval) => {
 
 const flattenAlarms = (alarms, out = {}) => {
   if (!alarms || typeof alarms !== 'object') return out;
+
   for (const [k, v] of Object.entries(alarms)) {
     if (v && typeof v === 'object' && !Array.isArray(v)) {
       flattenAlarms(v, out);
@@ -30,7 +31,6 @@ function formatLiveData(row) {
   const r = row;
 
   const data = {
-    // === IMPORTANT: Add recorded_at here ===
     recorded_at: r.recorded_at ? r.recorded_at.toISOString() : null,
 
     soc_percent: toNumber(r.soc_percent),
@@ -39,8 +39,13 @@ function formatLiveData(row) {
     dc_current_a: toNumber(r.battery_current_a),
     charging_current_a: toNumber(r.charger_current_demand_a),
 
-    temp_sensors: (r.temp_sensors || []).map(toNumber),
-    cell_voltages: (r.cell_voltages || []).map(toNumber),
+    temp_sensors: Array.isArray(r.temp_sensors)
+      ? r.temp_sensors.map(toNumber)
+      : [],
+
+    cell_voltages: Array.isArray(r.cell_voltages)
+      ? r.cell_voltages.map(toNumber)
+      : [],
 
     motor_torque_nm: toNumber(r.motor_torque_value),
     motor_torque_limit: toNumber(r.motor_torque_limit),
@@ -49,20 +54,18 @@ function formatLiveData(row) {
     motor_rotation_dir: r.motor_rotation_dir ?? null,
     ac_current_a: toNumber(r.motor_ac_current_a),
     motor_ac_voltage_v: toNumber(r.motor_ac_voltage_v),
-
-    // Correctly preserves "Enabled" / "Disabled" string
     mcu_enable_state: r.mcu_enable_state?.trim() || null,
-
     motor_temp_c: toNumber(r.motor_temp_c),
     mcu_temp_c: toNumber(r.mcu_temp_c),
-
     radiator_temp_c: toNumber(r.radiator_temp_c),
 
+    // ODO
     total_hours: intervalToHours(r.total_running_hrs),
     last_trip_hrs: intervalToHours(r.last_trip_hrs),
     total_kwh: toNumber(r.total_kwh_consumed),
     last_trip_kwh: toNumber(r.last_trip_kwh),
 
+    // DC–DC
     dcdc_input_voltage_v: toNumber(r.dcdc_input_voltage_v),
     dcdc_input_current_a: toNumber(r.dcdc_input_current_a),
     dcdc_output_voltage_v: toNumber(r.dcdc_output_voltage_v),
@@ -71,17 +74,18 @@ function formatLiveData(row) {
     dcdc_pri_c_mosfet_temp_c: toNumber(r.dcdc_pri_c_mosfet_temp_c),
     dcdc_sec_ls_mosfet_temp_c: toNumber(r.dcdc_sec_ls_mosfet_temp_c),
     dcdc_sec_hs_mosfet_temp_c: toNumber(r.dcdc_sec_hs_mosfet_temp_c),
-    dcdc_occurrence_count: toNumber(r.dcdc_occurence_count) ?? null,
+    dcdc_occurrence_count: toNumber(r.dcdc_occurence_count),
 
     output_power_kw: null,
   };
 
-  // Calculate output power
+  // Power calculation
   if (data.stack_voltage_v != null && data.dc_current_a != null) {
-    data.output_power_kw = (data.stack_voltage_v * data.dc_current_a) / 1000;
+    data.output_power_kw =
+      (data.stack_voltage_v * data.dc_current_a) / 1000;
   }
 
-  // Flatten alarms
+  // Alarms (flattened)
   Object.assign(data, flattenAlarms(r.alarms));
 
   return data;

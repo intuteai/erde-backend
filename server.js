@@ -64,14 +64,14 @@ app.set("io", io);
 telemetryService.setSocketIO(io);
 
 /* =========================
-   REGISTER REALTIME LAYERS
+   REGISTER REALTIME LAYERS — CORRECT ORDER!
 ========================= */
 
-// 1️⃣ Socket.IO (React frontend)
+// 1️⃣ Initialize Socket.IO for frontend clients FIRST
 initSocketIO(io);
 
-// 2️⃣ Raw WebSocket (/aws-ws) → bridges to Socket.IO
-// Passing both server + app is CORRECT
+// 2️⃣ Initialize Raw WebSocket bridge SECOND
+//     → Now it can safely access app.get("io")
 initRawWebSocket(server, app);
 
 /* =========================
