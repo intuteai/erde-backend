@@ -4,11 +4,12 @@ const jwt = require("jsonwebtoken");
 const logger = require("../utils/logger");
 const { parseCanDataWithDB } = require("../services/dbParser");
 const db = require("../config/postgres");
+const { formatLiveData } = require("../utils/formatLiveData"); // ← NEW
 require("dotenv").config();
 
 /**
  * Initialize Raw WebSocket Server for /aws-ws
- * Bridges parsed CAN data to Socket.IO clients in the frontend
+ * Bridges parsed CAN data → DB → formatted broadcast to Socket.IO frontend
  */
 const initWebSocket = (server, app) => {
   const wss = new WebSocket.Server({ noServer: true });
@@ -106,7 +107,7 @@ const initWebSocket = (server, app) => {
 
             const parsed = await parseCanDataWithDB(payloadHex, vehicleMasterId);
 
-            // Save live values
+            // === 1. Save live values to DB ===
             const keys = Object.keys(parsed).filter(
               (k) => !["timestamp", "fault_code", "fault_description"].includes(k)
             );
@@ -124,7 +125,7 @@ const initWebSocket = (server, app) => {
               );
             }
 
-            // Save DTC
+            // === 2. Save DTC if present ===
             if (parsed.fault_code) {
               await db.query(
                 `INSERT INTO dtc_events (vehicle_master_id, code, description, recorded_at)
@@ -133,25 +134,40 @@ const initWebSocket = (server, app) => {
               );
             }
 
-            const broadcast = { ...parsed, timestamp: Date.now(), deviceId };
-
-            // Broadcast to raw WS clients
+            // === 3. Broadcast to raw WS clients (optional – keep if you have raw clients) ===
+            const rawBroadcast = { ...parsed, timestamp: Date.now(), deviceId };
             wss.clients.forEach((client) => {
               if (client.readyState === WebSocket.OPEN && client.deviceId === deviceId) {
                 try {
-                  client.send(JSON.stringify(broadcast));
+                  client.send(JSON.stringify(rawBroadcast));
                 } catch (e) {
                   logger.warn(`Failed to send to raw client (${deviceId}): ${e.message}`);
                 }
               }
             });
 
-            // Broadcast to Socket.IO frontend clients
+            // === 4. Broadcast FORMATTED data to Socket.IO frontend clients ===
             const io = app.get("io");
             if (io) {
-              const room = `vehicle:${vehicleMasterId}`;  // FIXED: Matches socket.io.js
-              io.to(room).emit("live_update", broadcast);
-              logger.info(`Broadcasted live_update to Socket.IO room: ${room}`);
+              try {
+                // Read the latest row from DB (ensures we have full persisted data)
+                const latestRes = await db.query(
+                  `SELECT * FROM live_values 
+                   WHERE vehicle_master_id = $1 
+                   ORDER BY recorded_at DESC 
+                   LIMIT 1`,
+                  [vehicleMasterId]
+                );
+
+                if (latestRes.rows.length > 0) {
+                  const formatted = formatLiveData(latestRes.rows[0]);
+                  const room = `vehicle:${vehicleMasterId}`;
+                  io.to(room).emit("live_update", formatted);
+                  logger.info(`Broadcasted formatted live_update to Socket.IO room: ${room}`);
+                }
+              } catch (err) {
+                logger.error(`Error formatting or broadcasting live data: ${err.message}`);
+              }
             } else {
               logger.warn("Socket.IO instance not available for broadcasting");
             }
