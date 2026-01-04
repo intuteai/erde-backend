@@ -116,16 +116,8 @@ const initWebSocket = (server) => {
             );
           }
 
-          if (parsed.fault_code) {
-            await db.query(
-              `
-              INSERT INTO dtc_events (vehicle_master_id, code, description, recorded_at)
-              VALUES ($1, $2, $3, NOW())
-              ON CONFLICT DO NOTHING
-              `,
-              [vehicleMasterId, parsed.fault_code, parsed.fault_description || "Unknown"]
-            );
-          }
+          // 🔥 DTC INSERT BLOCK REMOVED COMPLETELY AS REQUIRED
+          // No code here – DTC lifecycle is now fully owned by pg_cron + reconcile_active_dtc
 
           // Invalidate cache → SSE clients get fresh data
           const cacheKey = `vehicle_live:${vehicleMasterId}`;

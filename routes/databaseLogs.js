@@ -1,35 +1,113 @@
+// routes/database-logs.js
+
 const express = require('express');
 const db = require('../config/postgres');
 const authenticateToken = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
+const { generalLimiter } = require('../middleware/rateLimiter');
+const logger = require('../utils/logger');
 
 const router = express.Router();
 
 /**
- * GET /api/database-logs/:vehicleId?date=YYYY-MM-DD
+ * GET /api/database-logs/:id
  *
- * Returns ALL raw telemetry records for the selected date in **local IST day**.
- * Uses AT TIME ZONE 'Asia/Kolkata' to match the calendar day as seen in India.
+ * Query params:
+ *   - date=YYYY-MM-DD                    → single day (default behavior)
+ *   - period=today | week | month | all  → predefined ranges
+ *   - start=YYYY-MM-DD&end=YYYY-MM-DD     → custom date range
+ *   - full=true                          → remove LIMIT 200 (for export)
+ *   - cursor=ISO_TIMESTAMP               → pagination (only when not full)
+ *
+ * All ranges are in IST (Asia/Kolkata)
  */
 router.get(
-  '/:vehicleId',
+  '/:id',
   authenticateToken,
   checkPermission('analytics', 'read'),
+  generalLimiter,
   async (req, res) => {
-    const { vehicleId } = req.params;
-    const { date } = req.query;
+    const { id } = req.params;
+    let { date, period, start, end, cursor, full } = req.query;
+    const isCustomer = req.user.role === 'customer';
+    full = full === 'true';
 
-    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      return res.status(400).json({ 
-        error: 'Invalid or missing date. Use ?date=YYYY-MM-DD format' 
-      });
+    // ---------------- VALIDATION ----------------
+    if (!id || isNaN(Number(id))) {
+      return res.status(400).json([]);
+    }
+
+    // At least one time filter required
+    if (!date && !period && !(start && end)) {
+      return res.status(400).json({ error: 'Missing time range: provide date, period, or start/end' });
     }
 
     try {
-      const query = `
-        SELECT 
-          live_id,
-          vehicle_master_id,
+      // ---------------- OWNERSHIP CHECK ----------------
+      const ownership = await db.query(
+        `
+        SELECT 1
+        FROM vehicle_master vm
+        JOIN customer_master cm ON vm.customer_id = cm.customer_id
+        WHERE vm.vehicle_master_id = $1
+          AND ($2::int IS NULL OR cm.user_id = $2)
+        `,
+        [id, isCustomer ? req.user.user_id : null]
+      );
+
+      if (ownership.rows.length === 0) {
+        logger.warn(`Access denied: user ${req.user.email || 'unknown'} tried logs for vehicle ${id}`);
+        return res.status(403).json([]);
+      }
+
+      // ---------------- BUILD TIME FILTER ----------------
+      let timeClause = '';
+      const params = [Number(id)];
+
+      if (period) {
+        const nowIST = "timezone('Asia/Kolkata', now())";
+
+        switch (period) {
+          case 'today':
+            timeClause = `recorded_at >= ${nowIST}::date AND recorded_at < ${nowIST}::date + interval '1 day'`;
+            break;
+          case 'week':
+            timeClause = `recorded_at >= ${nowIST}::date - interval '6 days'`;
+            break;
+          case 'month':
+            timeClause = `recorded_at >= ${nowIST}::date - interval '29 days'`;
+            break;
+          case 'all':
+            // No time filter — get everything
+            timeClause = 'TRUE';
+            break;
+          default:
+            return res.status(400).json({ error: 'Invalid period: use today, week, month, or all' });
+        }
+      } else if (start && end) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
+          return res.status(400).json({ error: 'Invalid start/end date format' });
+        }
+        params.push(start, end);
+        timeClause = `
+          recorded_at >= timezone('Asia/Kolkata', $2::date)
+          AND recorded_at < timezone('Asia/Kolkata', $3::date + interval '1 day')
+        `;
+      } else {
+        // Single day mode
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+          return res.status(400).json({ error: 'Invalid date format' });
+        }
+        params.push(date);
+        timeClause = `
+          recorded_at >= timezone('Asia/Kolkata', $2::date)
+          AND recorded_at < timezone('Asia/Kolkata', $2::date + interval '1 day')
+        `;
+      }
+
+      // ---------------- QUERY ----------------
+      let query = `
+        SELECT
           recorded_at,
           soc_percent,
           stack_voltage_v,
@@ -61,7 +139,6 @@ router.get(
           last_trip_hrs,
           total_kwh_consumed,
           last_trip_kwh,
-          alarms,
           dcdc_pri_a_mosfet_temp_c,
           dcdc_sec_ls_mosfet_temp_c,
           dcdc_sec_hs_mosfet_temp_c,
@@ -73,31 +150,55 @@ router.get(
           dcdc_occurence_count
         FROM live_values
         WHERE vehicle_master_id = $1
-          AND (recorded_at AT TIME ZONE 'Asia/Kolkata')::date = $2::date
-        ORDER BY recorded_at ASC
+          AND ${timeClause}
       `;
 
-      const { rows } = await db.query(query, [vehicleId, date]);
-
-      if (rows.length === 0) {
-        return res.json([]); // Frontend shows "No data"
+      // Cursor pagination (only when not exporting full)
+      if (!full && cursor) {
+        params.push(cursor);
+        query += ` AND recorded_at > $${params.length}::timestamptz`;
       }
 
-      // Clean formatting for frontend
+      query += ` ORDER BY recorded_at ASC`;
+
+      // Limit only for paginated UI (not exports)
+      if (!full) {
+        query += ` LIMIT 200`;
+      }
+
+      const result = await db.query(query, params);
+      const rows = result?.rows || [];
+
+      // ---------------- FORMAT RESPONSE ----------------
       const formatted = rows.map(row => ({
         ...row,
-        recorded_at: new Date(row.recorded_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
-        cell_voltages: row.cell_voltages || [],
-        temp_sensors: row.temp_sensors || [],
-        alarms: row.alarms || {},
-        total_running_hrs: row.total_running_hrs ? String(row.total_running_hrs).slice(0, 8) : null,
-        last_trip_hrs: row.last_trip_hrs ? String(row.last_trip_hrs).slice(0, 8) : null,
+        recorded_at_raw: row.recorded_at.toISOString(),
+        recorded_at: row.recorded_at.toLocaleString('en-IN', {
+          timeZone: 'Asia/Kolkata',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false,
+        }),
+        cell_voltages: row.cell_voltages ?? [],
+        temp_sensors: row.temp_sensors ?? [],
+        total_running_hrs: row.total_running_hrs ? row.total_running_hrs.toString().slice(0, 8) : null,
+        last_trip_hrs: row.last_trip_hrs ? row.last_trip_hrs.toString().slice(0, 8) : null,
       }));
 
-      res.json(formatted);
+      // Pagination header only for paginated requests
+      if (!full) {
+        res.set('X-Has-More', rows.length === 200 ? 'true' : 'false');
+      }
+
+      return res.status(200).json(formatted);
+
     } catch (err) {
-      console.error('Database logs error:', err);
-      res.status(500).json({ error: 'Server error while fetching logs' });
+      logger.error(`Database logs error (vehicle ${id}): ${err.message}`);
+      return res.status(500).json([]);
     }
   }
 );
