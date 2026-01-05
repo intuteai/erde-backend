@@ -60,7 +60,7 @@ const insertTelemetryItems = async (items = []) => {
     let inserted = 0;
 
     for (const item of items) {
-      const { ts, vehicleIdOrMasterId, live = {} } = item;
+      const { ts, vehicleMasterId, live = {} } = item;
 
       const cellVoltages = normalizeModuleArray(
         live.cell_module_avg_v,
@@ -72,7 +72,7 @@ const insertTelemetryItems = async (items = []) => {
       );
 
       const values = [
-        vehicleIdOrMasterId,
+        vehicleMasterId,
         ts,
 
         // ================= BATTERY =================
@@ -125,7 +125,29 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.last_trip_kwh),
 
         // ================= ALARMS =================
-        live.alarms ? JSON.stringify(live.alarms) : JSON.stringify({})
+        live.alarms ? JSON.stringify(live.alarms) : JSON.stringify({}),
+
+        // ================= NEW BTMS / BMS THERMAL FIELDS =================
+        toNum(live.btms_command_mode),
+        toNum(live.btms_hv_request),
+        toNum(live.btms_charge_status),
+        toNum(live.bms_hv_relay_state),
+        toNum(live.btms_target_temp_c),
+        toNum(live.bms_pack_voltage_v),
+        toNum(live.bms_life_counter),
+        toNum(live.btms_command_crc),
+        toNum(live.btms_status_mode),
+        toNum(live.btms_hv_relay_state),
+        toNum(live.btms_inlet_temp_c),
+        toNum(live.btms_outlet_temp_c),
+        toNum(live.btms_demand_power_kw),
+
+        // ================= NEW MOTOR / INVERTER RAW FIELDS =================
+        toNum(live.motor_status_word),
+        toNum(live.motor_freq_raw),
+        toNum(live.motor_total_wattage_w),
+        toNum(live.motor_dc_input_voltage_raw),
+        toNum(live.motor_ac_output_voltage_raw),
       ];
 
       await client.query(
@@ -153,7 +175,14 @@ const insertTelemetryItems = async (items = []) => {
           dcdc_occurence_count,
           total_running_hrs, last_trip_hrs,
           total_kwh_consumed, last_trip_kwh,
-          alarms
+          alarms,
+          btms_command_mode, btms_hv_request, btms_charge_status,
+          bms_hv_relay_state, btms_target_temp_c, bms_pack_voltage_v,
+          bms_life_counter, btms_command_crc,
+          btms_status_mode, btms_hv_relay_state,
+          btms_inlet_temp_c, btms_outlet_temp_c, btms_demand_power_kw,
+          motor_status_word, motor_freq_raw, motor_total_wattage_w,
+          motor_dc_input_voltage_raw, motor_ac_output_voltage_raw
         )
         VALUES (
           $1, to_timestamp($2 / 1000.0),
@@ -170,7 +199,10 @@ const insertTelemetryItems = async (items = []) => {
           $33, $34, $35, $36, $37,
           $38::interval, $39::interval,
           $40, $41,
-          $42::jsonb
+          $42::jsonb,
+          $43, $44, $45, $46, $47, $48, $49, $50,
+          $51, $52, $53, $54, $55,
+          $56, $57, $58, $59, $60
         )
         `,
         values
@@ -180,8 +212,8 @@ const insertTelemetryItems = async (items = []) => {
          LIVE SOCKET PUSH (SAFE)
       ========================= */
       if (io) {
-        io.to(`vehicle:${vehicleIdOrMasterId}`).emit("live_update", {
-          vehicleId: vehicleIdOrMasterId,
+        io.to(`vehicle:${vehicleMasterId}`).emit("live_update", {
+          vehicleId: vehicleMasterId,
           recorded_at: ts,
           ...live,
         });
