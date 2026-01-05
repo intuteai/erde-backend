@@ -78,7 +78,6 @@ router.get(
             timeClause = `recorded_at >= ${nowIST}::date - interval '29 days'`;
             break;
           case 'all':
-            // No time filter — get everything
             timeClause = 'TRUE';
             break;
           default:
@@ -135,8 +134,9 @@ router.get(
           motor_temp_c,
           mcu_temp_c,
           radiator_temp_c,
-          total_running_hrs,
-          last_trip_hrs,
+          -- Formatted as clean HH:MM:SS strings (handles >24h correctly)
+          to_char(total_running_hrs, 'HH24:MI:SS') AS total_running_hrs,
+          to_char(last_trip_hrs, 'HH24:MI:SS') AS last_trip_hrs,
           total_kwh_consumed,
           last_trip_kwh,
           dcdc_pri_a_mosfet_temp_c,
@@ -153,7 +153,7 @@ router.get(
           AND ${timeClause}
       `;
 
-      // Cursor pagination (only when not exporting full)
+      // Cursor pagination (only when not full/export)
       if (!full && cursor) {
         params.push(cursor);
         query += ` AND recorded_at > $${params.length}::timestamptz`;
@@ -169,7 +169,7 @@ router.get(
       const result = await db.query(query, params);
       const rows = result?.rows || [];
 
-      // ---------------- FORMAT RESPONSE ----------------
+      // ---------------- FORMAT RESPONSE (only for paginated UI) ----------------
       const formatted = rows.map(row => ({
         ...row,
         recorded_at_raw: row.recorded_at.toISOString(),
@@ -185,11 +185,12 @@ router.get(
         }),
         cell_voltages: row.cell_voltages ?? [],
         temp_sensors: row.temp_sensors ?? [],
-        total_running_hrs: row.total_running_hrs ? row.total_running_hrs.toString().slice(0, 8) : null,
-        last_trip_hrs: row.last_trip_hrs ? row.last_trip_hrs.toString().slice(0, 8) : null,
+        // Now these are already clean strings from SQL → no extra formatting needed
+        total_running_hrs: row.total_running_hrs,
+        last_trip_hrs: row.last_trip_hrs,
       }));
 
-      // Pagination header only for paginated requests
+      // Pagination header
       if (!full) {
         res.set('X-Has-More', rows.length === 200 ? 'true' : 'false');
       }
