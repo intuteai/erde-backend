@@ -7,11 +7,12 @@ const logger = require('./utils/logger');
    ROUTES
 ========================= */
 const authRoutes             = require('./routes/auth.js');
+const userRoutes             = require('./routes/user.js');           // ← NEW: User management (change password, etc.)
 const customerRoutes         = require('./routes/customer.js');
 const vehicleTypeRoutes      = require('./routes/vehicleType.js');
 const vehicleCategoryRoutes  = require('./routes/vehicleCategory.js');
 const vehicleMasterRoutes    = require('./routes/vehicle-master.js');
-const vehicleRoutes          = require('./routes/vehicle.js');  // ← Now includes /stream !
+const vehicleRoutes          = require('./routes/vehicle.js');        // ← Includes /stream (SSE)
 const batteryRoutes          = require('./routes/battery.js');
 const motorRoutes            = require('./routes/motor.js');
 const faultsRoutes           = require('./routes/faults.js');
@@ -69,12 +70,15 @@ app.get('/health', (req, res) => {
 /* =========================
    PROTECTED ROUTES
 ========================= */
+// Public but rate-limited user actions (e.g., change password)
+app.use('/api/user', generalLimiter, userRoutes);  // ← NEW ROUTE GROUP
+
 app.use('/api/customers',          generalLimiter, customerRoutes);
 app.use('/api/vehicle-types',      generalLimiter, vehicleTypeRoutes);
 app.use('/api/vehicle-categories', generalLimiter, vehicleCategoryRoutes);
 app.use('/api/vehicle-master',     generalLimiter, vehicleMasterRoutes);
-app.use('/vehicle-master',         generalLimiter, vehicleMasterRoutes); // legacy
-app.use('/api/vehicles',           generalLimiter, vehicleRoutes);     // ← SSE is here now!
+app.use('/vehicle-master',         generalLimiter, vehicleMasterRoutes); // legacy support
+app.use('/api/vehicles',           generalLimiter, vehicleRoutes);
 app.use('/api/battery',            generalLimiter, batteryRoutes);
 app.use('/api/motor',              generalLimiter, motorRoutes);
 app.use('/api/faults',             generalLimiter, faultsRoutes);
