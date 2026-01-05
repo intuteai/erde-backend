@@ -7,8 +7,11 @@ const db = require("../config/postgres");
 const { formatLiveData } = require("../utils/formatLiveData");
 require("dotenv").config();
 
-// ✅ Import shared cache from dedicated service
+// ✅ Import shared cache
 const { liveCache, cleanupLiveCache } = require("../services/liveCache");
+
+// ✅ Import the correct, full telemetry inserter
+const { insertTelemetryItems } = require("../services/telemetryService");
 
 const initWebSocket = (server) => {
   const wss = new WebSocket.Server({ noServer: true });
@@ -92,45 +95,37 @@ const initWebSocket = (server) => {
 
           const parsed = await parseCanDataWithDB(payloadHex, vehicleMasterId);
 
-          const keys = Object.keys(parsed).filter(
+          // Skip if no meaningful data
+          const dataKeys = Object.keys(parsed).filter(
             (k) => !["timestamp", "fault_code", "fault_description"].includes(k)
           );
+          if (dataKeys.length === 0) return;
 
-          if (keys.length) {
-            const columns = ["vehicle_master_id", "recorded_at", ...keys];
-            const values = [vehicleMasterId, new Date(), ...keys.map((k) => parsed[k])];
-            const placeholders = values.map((_, i) => `$${i + 1}`).join(", ");
+          // Forward to the robust telemetry inserter
+          const telemetryItem = {
+            ts: Date.now(),
+            vehicleMasterId,
+            live: parsed,
+          };
 
-            const updates = keys.map(k => `${k} = EXCLUDED.${k}`).join(", ");
+          await insertTelemetryItems([telemetryItem]);
 
-            await db.query(
-              `
-              INSERT INTO live_values (${columns.join(", ")})
-              VALUES (${placeholders})
-              ON CONFLICT (vehicle_master_id)
-              DO UPDATE SET
-                recorded_at = EXCLUDED.recorded_at,
-                ${updates}
-              `,
-              values
-            );
-          }
-
-          // 🔥 DTC INSERT BLOCK REMOVED COMPLETELY AS REQUIRED
-          // No code here – DTC lifecycle is now fully owned by pg_cron + reconcile_active_dtc
-
-          // Invalidate cache → SSE clients get fresh data
+          // Invalidate live cache so SSE clients get fresh data
           const cacheKey = `vehicle_live:${vehicleMasterId}`;
           liveCache.delete(cacheKey);
           cleanupLiveCache();
 
-          logger.info(`Live data updated & cache invalidated for vehicle ${vehicleMasterId}`);
+          logger.info(`Live data updated via AWS WS → vehicle ${vehicleMasterId}`);
         } catch (err) {
-          logger.error(`AWS message processing failed: ${err.message}`);
+          logger.error(`AWS message processing failed: ${err.message}`, { stack: err.stack });
         }
       });
 
-      awsWs.on("close", () => awsWsPool.delete(deviceId));
+      awsWs.on("close", () => {
+        awsWsPool.delete(deviceId);
+        logger.info(`AWS WS closed: ${deviceId}`);
+      });
+
       awsWs.on("error", (err) => {
         logger.error(`AWS WS error for ${deviceId}: ${err.message}`);
         awsWsPool.delete(deviceId);
@@ -146,10 +141,10 @@ const initWebSocket = (server) => {
 
       if (!stillActive) {
         const awsWs = awsWsPool.get(deviceId);
-        if (awsWs) {
+        if (awsWs && awsWs.readyState === WebSocket.OPEN) {
           awsWs.close();
           awsWsPool.delete(deviceId);
-          logger.info(`AWS WS closed (no clients): ${deviceId}`);
+          logger.info(`AWS WS closed (no clients left): ${deviceId}`);
         }
       }
     });

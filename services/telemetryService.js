@@ -60,16 +60,37 @@ const insertTelemetryItems = async (items = []) => {
     let inserted = 0;
 
     for (const item of items) {
-      const { ts, vehicleMasterId, live = {} } = item;
+      const { ts, live = {} } = item;
 
-      const cellVoltages = normalizeModuleArray(
-        live.cell_module_avg_v,
-        5
-      );
-      const tempSensors = normalizeModuleArray(
-        live.temp_module_avg_c,
-        5
-      );
+      // Extract vehicle_master_id flexibly – matches your TelemetryUploader.ts
+      let vehicleMasterId = 
+        item.vehicleIdOrMasterId ||
+        item.vehicleMasterId ||
+        item.vehicle_master_id ||
+        item.vehicleId ||
+        item.vehicle_id ||
+        item.vid ||
+        item.deviceId ||
+        item.device_id;
+
+      if (!vehicleMasterId) {
+        logger.warn("Telemetry item missing vehicle ID – skipping", {
+          itemKeys: Object.keys(item),
+          sample: item,
+        });
+        continue;
+      }
+
+      vehicleMasterId = Number(vehicleMasterId);
+      if (isNaN(vehicleMasterId) || vehicleMasterId <= 0) {
+        logger.warn("Invalid vehicle_master_id (not a positive number)", {
+          received: item.vehicleIdOrMasterId || item.vehicleMasterId || item.vehicleId,
+        });
+        continue;
+      }
+
+      const cellVoltages = normalizeModuleArray(live.cell_module_avg_v, 5);
+      const tempSensors = normalizeModuleArray(live.temp_module_avg_c, 5);
 
       const values = [
         vehicleMasterId,
@@ -235,5 +256,5 @@ const insertTelemetryItems = async (items = []) => {
 
 module.exports = {
   insertTelemetryItems,
-  setSocketIO, // 👈 export setter
+  setSocketIO,
 };
