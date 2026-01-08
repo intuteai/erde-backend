@@ -22,30 +22,27 @@ const toNum = (v) =>
 
 const toText = (v) => (v === null || v === undefined ? null : String(v));
 
-/**
- * Ensures array is exactly length N, ordered, no guessing.
- * Pads with null, trims extras.
- */
-const normalizeModuleArray = (arr, size = 5) => {
+const normalizeSnapshotArray = (arr, expectedLength) => {
   if (!Array.isArray(arr)) return null;
-  const out = new Array(size).fill(null);
-  for (let i = 0; i < Math.min(arr.length, size); i++) {
-    out[i] = toNum(arr[i]);
+
+  const out = new Array(expectedLength).fill(null);
+
+  for (let i = 0; i < Math.min(arr.length, expectedLength); i++) {
+    const v = Number(arr[i]);
+    out[i] = Number.isFinite(v) ? v : null;
   }
+
   return out;
 };
 
-/**
- * Accepts:
- *  - seconds (number)
- *  - ISO duration string
- *  - postgres interval literal
- */
 const toInterval = (v) => {
   if (v === null || v === undefined) return null;
   if (typeof v === "number") return `${v} seconds`;
   return String(v);
 };
+
+const TEMP_SENSOR_COUNT = 144;
+const CELL_VOLTAGE_COUNT = 192;
 
 /* =========================
    MAIN INSERT FUNCTION
@@ -89,8 +86,15 @@ const insertTelemetryItems = async (items = []) => {
         continue;
       }
 
-      const cellVoltages = normalizeModuleArray(live.cell_module_avg_v, 5);
-      const tempSensors = normalizeModuleArray(live.temp_module_avg_c, 5);
+      const tempSensors = normalizeSnapshotArray(
+        live.temp_sensors,
+        TEMP_SENSOR_COUNT
+      );
+
+      const cellVoltages = normalizeSnapshotArray(
+        live.cell_voltages,
+        CELL_VOLTAGE_COUNT
+      );
 
       const values = [
         vehicleMasterId,
