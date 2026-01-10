@@ -8,7 +8,8 @@ const router = express.Router();
 const MODULE = 'vcu';
 
 /* ============================================================
-   GET ALL VCUs
+   GET ALL VCUs – Enhanced with assignment status
+   (Shows complete list for VCU master page + assignment info for Vehicle Master)
 ============================================================ */
 router.get(
   '/',
@@ -18,15 +19,22 @@ router.get(
     try {
       const result = await db.query(`
         SELECT
-          vcu_id,
-          vcu_make,
-          vcu_model,
-          serial_number,
-          vcu_specs,
-          created_at,
-          updated_at
-        FROM vcu_master
-        ORDER BY vcu_make, vcu_model, serial_number
+          v.vcu_id,
+          v.vcu_make,
+          v.vcu_model,
+          v.serial_number,
+          v.vcu_specs,
+          v.created_at,
+          v.updated_at,
+          -- Assignment status fields (used by Vehicle Master for filtering)
+          CASE 
+            WHEN vm.vehicle_master_id IS NOT NULL THEN true 
+            ELSE false 
+          END AS is_assigned,
+          vm.vehicle_unique_id AS assigned_vehicle_unique_id
+        FROM vcu_master v
+        LEFT JOIN vehicle_master vm ON vm.vcu_id = v.vcu_id
+        ORDER BY v.vcu_make, v.vcu_model, v.serial_number
       `);
 
       res.json(result.rows);
