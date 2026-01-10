@@ -8,7 +8,8 @@ const router = express.Router();
 const MODULE = 'hmi';
 
 /* ============================================================
-   GET ALL HMIs
+   GET ALL HMIs – Enhanced with assignment status
+   (Shows complete list for HMI master page + assignment info for Vehicle Master)
 ============================================================ */
 router.get(
   '/',
@@ -18,15 +19,22 @@ router.get(
     try {
       const result = await db.query(`
         SELECT
-          hmi_id,
-          hmi_make,
-          hmi_model,
-          serial_number,
-          hmi_specs,
-          created_at,
-          updated_at
-        FROM hmi_master
-        ORDER BY hmi_make, hmi_model, serial_number
+          h.hmi_id,
+          h.hmi_make,
+          h.hmi_model,
+          h.imei_number,              -- ← Using the renamed column
+          h.hmi_specs,
+          h.created_at,
+          h.updated_at,
+          -- Assignment status fields (used by Vehicle Master for filtering)
+          CASE 
+            WHEN vm.vehicle_master_id IS NOT NULL THEN true 
+            ELSE false 
+          END AS is_assigned,
+          vm.vehicle_unique_id AS assigned_vehicle_unique_id
+        FROM hmi_master h
+        LEFT JOIN vehicle_master vm ON vm.hmi_id = h.hmi_id
+        ORDER BY h.hmi_make, h.hmi_model, h.imei_number
       `);
 
       res.json(result.rows);
@@ -64,18 +72,18 @@ router.get(
 );
 
 /* ============================================================
-   CREATE HMI (ONE ROW = ONE SERIAL)
+   CREATE HMI (ONE ROW = ONE IMEI)
 ============================================================ */
 router.post(
   '/',
   authenticateToken,
   checkPermission(MODULE, 'write'),
   async (req, res) => {
-    const { hmi_make, hmi_model, serial_number, hmi_specs } = req.body;
+    const { hmi_make, hmi_model, imei_number, hmi_specs } = req.body;
 
-    if (!hmi_make || !hmi_model || !serial_number) {
+    if (!hmi_make || !hmi_model || !imei_number) {
       return res.status(400).json({
-        error: 'hmi_make, hmi_model and serial_number are required',
+        error: 'hmi_make, hmi_model and imei_number are required',
       });
     }
 
@@ -85,7 +93,7 @@ router.post(
         INSERT INTO hmi_master (
           hmi_make,
           hmi_model,
-          serial_number,
+          imei_number,              -- ← Updated column name
           hmi_specs,
           created_by
         )
@@ -95,7 +103,7 @@ router.post(
         [
           hmi_make.trim(),
           hmi_model.trim(),
-          serial_number.trim(),
+          imei_number.trim(),
           hmi_specs || null,
           req.user.user_id,
         ]
@@ -107,7 +115,7 @@ router.post(
 
       if (err.code === '23505') {
         return res.status(409).json({
-          error: 'Serial number already exists',
+          error: 'IMEI number already exists',
         });
       }
 
@@ -117,14 +125,14 @@ router.post(
 );
 
 /* ============================================================
-   UPDATE HMI (SERIAL EDITABLE BUT UNIQUE)
+   UPDATE HMI (IMEI EDITABLE BUT UNIQUE)
 ============================================================ */
 router.put(
   '/:id',
   authenticateToken,
   checkPermission(MODULE, 'write'),
   async (req, res) => {
-    const allowed = ['hmi_make', 'hmi_model', 'serial_number', 'hmi_specs'];
+    const allowed = ['hmi_make', 'hmi_model', 'imei_number', 'hmi_specs'];
     const updates = [];
     const values = [];
     let i = 1;
@@ -165,7 +173,7 @@ router.put(
 
       if (err.code === '23505') {
         return res.status(409).json({
-          error: 'Serial number already exists',
+          error: 'IMEI number already exists',
         });
       }
 

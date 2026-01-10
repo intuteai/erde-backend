@@ -98,7 +98,6 @@ router.get(
 /* ============================================================
    2. GET /api/vehicle-master/my
    → Customer's own vehicles WITH live telemetry + capacity
-   → Now ordered by vehicle_master_id ASC to match Admin Dashboard
 ============================================================ */
 router.get(
   '/my',
@@ -165,7 +164,7 @@ router.get(
           LIMIT 1
         ) lv ON true
         WHERE vm.customer_id = $1
-        ORDER BY vm.vehicle_master_id ASC   -- ← FIXED: Now ASC to match Admin
+        ORDER BY vm.vehicle_master_id ASC
       `, [customerId]);
 
       const data = result.rows.map(row => ({
@@ -194,6 +193,7 @@ router.get(
 
 /* ============================================================
    3. GET /api/vehicle-master (Admin → all detailed vehicles)
+   → Now includes assignment visibility fields
 ============================================================ */
 router.get(
   '/',
@@ -233,7 +233,18 @@ router.get(
 
           vt.make  AS vehicle_make,
           vt.model AS vehicle_model,
-          cm.company_name
+          cm.company_name,
+
+          -- New: Assignment visibility (helps admin see who uses this VCU/HMI)
+          (SELECT v2.vehicle_unique_id 
+           FROM vehicle_master v2 
+           WHERE v2.vcu_id = vm.vcu_id AND v2.vehicle_master_id != vm.vehicle_master_id
+           LIMIT 1) AS vcu_assigned_to,
+
+          (SELECT v2.vehicle_unique_id 
+           FROM vehicle_master v2 
+           WHERE v2.hmi_id = vm.hmi_id AND v2.vehicle_master_id != vm.vehicle_master_id
+           LIMIT 1) AS hmi_assigned_to
 
         FROM vehicle_master vm
         JOIN vehicle_type_master vt ON vm.vtype_id = vt.vtype_id
@@ -251,6 +262,7 @@ router.get(
 
 /* ============================================================
    4. POST /api/vehicle-master
+   → Already protected by DB unique constraint on vcu_id/hmi_id
 ============================================================ */
 router.post(
   '/',
@@ -335,6 +347,12 @@ router.post(
       if (err.code === '23505') {
         return res.status(409).json({ error: 'Vehicle Unique ID already exists' });
       }
+      if (err.code === '23505' && err.constraint === 'vehicle_master_vcu_id_unique') {
+        return res.status(409).json({ error: 'This VCU is already assigned to another vehicle' });
+      }
+      if (err.code === '23505' && err.constraint === 'vehicle_master_hmi_id_unique') {
+        return res.status(409).json({ error: 'This HMI is already assigned to another vehicle' });
+      }
       res.status(500).json({ error: 'Failed to create vehicle' });
     }
   }
@@ -342,6 +360,7 @@ router.post(
 
 /* ============================================================
    5. PUT /api/vehicle-master/:id
+   → Already protected by DB unique constraint
 ============================================================ */
 router.put(
   '/:id',
@@ -395,7 +414,13 @@ router.put(
     } catch (err) {
       logger.error('PUT /vehicle-master/:id error:', err.message);
       if (err.code === '23505') {
-        return res.status(409).json({ error: 'Unique constraint violated' });
+        if (err.constraint === 'vehicle_master_vcu_id_unique') {
+          return res.status(409).json({ error: 'This VCU is already assigned to another vehicle' });
+        }
+        if (err.constraint === 'vehicle_master_hmi_id_unique') {
+          return res.status(409).json({ error: 'This HMI is already assigned to another vehicle' });
+        }
+        return res.status(409).json({ error: 'Unique constraint violated (possibly unique ID)' });
       }
       res.status(500).json({ error: 'Update failed' });
     }
