@@ -94,7 +94,7 @@ router.get(
         `;
       }
 
-      // ---------------- UPDATED QUERY WITH ALL NEW FIELDS ----------------
+      // ---------------- UPDATED QUERY – ARRAYS REMOVED ----------------
       let query = `
         SELECT
           recorded_at,
@@ -110,8 +110,6 @@ router.get(
           battery_current_a,
           charger_current_demand_a,
           charger_voltage_demand_v,
-          cell_voltages,
-          temp_sensors,
           motor_torque_limit,
           motor_torque_value,
           motor_speed_rpm,
@@ -181,7 +179,7 @@ router.get(
       const result = await db.query(query, params);
       const rows = result?.rows || [];
 
-      // ---------------- FORMAT RESPONSE ----------------
+      // ---------------- FORMAT RESPONSE – arrays removed ----------------
       const formatted = rows.map(row => ({
         ...row,
         recorded_at_raw: row.recorded_at.toISOString(),
@@ -195,8 +193,6 @@ router.get(
           second: '2-digit',
           hour12: false,
         }),
-        cell_voltages: row.cell_voltages ?? [],
-        temp_sensors: row.temp_sensors ?? [],
         total_running_hrs: row.total_running_hrs,
         last_trip_hrs: row.last_trip_hrs,
       }));

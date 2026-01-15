@@ -21,7 +21,6 @@ const getVehicleStatus = (lastSeen) => {
 
 /* ============================================================
    1. GET /api/vehicle-master/admin-summary
-   → Full fleet summary for Admin Dashboard (with live stats)
 ============================================================ */
 router.get(
   '/admin-summary',
@@ -97,7 +96,6 @@ router.get(
 
 /* ============================================================
    2. GET /api/vehicle-master/my
-   → Customer's own vehicles WITH live telemetry + capacity
 ============================================================ */
 router.get(
   '/my',
@@ -105,7 +103,6 @@ router.get(
   checkPermission('vehicle_master', 'read'),
   async (req, res) => {
     try {
-      // Get customer_id from logged-in user
       const custRes = await db.query(
         `SELECT customer_id FROM customer_master WHERE user_id = $1`,
         [req.user.user_id]
@@ -121,7 +118,7 @@ router.get(
         SELECT
           vm.vehicle_master_id,
           vm.vehicle_reg_no,
-          vm.date_of_deployment,
+          vm.date_of_deployment::text AS date_of_deployment,
 
           vt.make AS vehicle_make,
           vt.model AS vehicle_model,
@@ -192,8 +189,7 @@ router.get(
 );
 
 /* ============================================================
-   3. GET /api/vehicle-master (Admin → all detailed vehicles)
-   → Now includes assignment visibility fields
+   3. GET /api/vehicle-master (Admin full detailed list)
 ============================================================ */
 router.get(
   '/',
@@ -208,8 +204,9 @@ router.get(
           vm.vehicle_reg_no,
           vm.customer_id,
           vm.vtype_id,
-          vm.vcu_id,
-          vm.hmi_id,
+
+          vcu.serial_number AS vcu_serial,
+          hmi.imei_number  AS hmi_imei,
 
           vm.vcu_make_model,
           vm.hmi_make_model,
@@ -229,13 +226,12 @@ router.get(
           vm.motor_cooling_yesno,
           vm.motor_cooling_details,
 
-          vm.date_of_deployment,
+          vm.date_of_deployment::text AS date_of_deployment,
 
           vt.make  AS vehicle_make,
           vt.model AS vehicle_model,
           cm.company_name,
 
-          -- New: Assignment visibility (helps admin see who uses this VCU/HMI)
           (SELECT v2.vehicle_unique_id 
            FROM vehicle_master v2 
            WHERE v2.vcu_id = vm.vcu_id AND v2.vehicle_master_id != vm.vehicle_master_id
@@ -249,6 +245,8 @@ router.get(
         FROM vehicle_master vm
         JOIN vehicle_type_master vt ON vm.vtype_id = vt.vtype_id
         JOIN customer_master cm ON vm.customer_id = cm.customer_id
+        LEFT JOIN vcu_master vcu ON vm.vcu_id = vcu.vcu_id
+        LEFT JOIN hmi_master hmi ON vm.hmi_id = hmi.hmi_id
         ORDER BY vm.vehicle_master_id DESC
       `);
 
@@ -262,7 +260,6 @@ router.get(
 
 /* ============================================================
    4. POST /api/vehicle-master
-   → Already protected by DB unique constraint on vcu_id/hmi_id
 ============================================================ */
 router.post(
   '/',
@@ -276,7 +273,6 @@ router.post(
       vcu_id,
       hmi_id,
       vehicle_reg_no,
-
       vcu_make_model,
       hmi_make_model,
       motor_unique_id,
@@ -287,14 +283,12 @@ router.post(
       battery_make_model,
       dc_dc_make_model,
       btms_make_model,
-
       hyd_cooling_yesno,
       motor_controller_details,
       compressor_yesno,
       compressor_details,
       motor_cooling_yesno,
       motor_cooling_details,
-
       date_of_deployment
     } = req.body;
 
@@ -360,7 +354,6 @@ router.post(
 
 /* ============================================================
    5. PUT /api/vehicle-master/:id
-   → Already protected by DB unique constraint
 ============================================================ */
 router.put(
   '/:id',
