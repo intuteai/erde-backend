@@ -1,6 +1,7 @@
 // services/telemetryService.js
 const db = require("../config/postgres");
 const logger = require("../utils/logger");
+const crypto = require("crypto");
 
 /* =========================
    SOCKET.IO INJECTION
@@ -44,11 +45,81 @@ const toInterval = (v) => {
 const TEMP_SENSOR_COUNT = 144;
 const CELL_VOLTAGE_COUNT = 192;
 
+const LIVE_VALUES_COLUMNS = [
+  "vehicle_master_id",
+  "recorded_at",
+  "soc_percent",
+  "stack_voltage_v",
+  "battery_status",
+  "max_voltage_v",
+  "min_voltage_v",
+  "avg_voltage_v",
+  "max_temp_c",
+  "min_temp_c",
+  "avg_temp_c",
+  "battery_current_a",
+  "charger_current_demand_a",
+  "charger_voltage_demand_v",
+  "cell_voltages",
+  "temp_sensors",
+  "motor_torque_limit",
+  "motor_torque_value",
+  "motor_speed_rpm",
+  "motor_rotation_dir",
+  "motor_operation_mode",
+  "mcu_enable_state",
+  "motor_ac_current_a",
+  "motor_ac_voltage_v",
+  "dc_side_voltage_v",
+  "motor_temp_c",
+  "mcu_temp_c",
+  "radiator_temp_c",
+  "dcdc_pri_a_mosfet_temp_c",
+  "dcdc_sec_ls_mosfet_temp_c",
+  "dcdc_sec_hs_mosfet_temp_c",
+  "dcdc_pri_c_mosfet_temp_c",
+  "dcdc_input_voltage_v",
+  "dcdc_input_current_a",
+  "dcdc_output_voltage_v",
+  "dcdc_output_current_a",
+  "dcdc_occurence_count",
+  "total_running_hrs",
+  "last_trip_hrs",
+  "total_kwh_consumed",
+  "last_trip_kwh",
+  "alarms",
+  "btms_command_mode",
+  "btms_hv_request",
+  "btms_charge_status",
+  "bms_hv_relay_state",
+  "btms_target_temp_c",
+  "bms_pack_voltage_v",
+  "bms_life_counter",
+  "btms_command_crc",
+  "btms_status_mode",
+  "btms_hv_relay_state",
+  "btms_inlet_temp_c",
+  "btms_outlet_temp_c",
+  "btms_demand_power_kw",
+  "motor_status_word",
+  "motor_freq_raw",
+  "motor_total_wattage_w",
+  "motor_dc_input_voltage_raw",
+  "motor_ac_output_voltage_raw",
+];
+
 /* =========================
    MAIN INSERT FUNCTION
 ========================= */
 const insertTelemetryItems = async (items = []) => {
   if (!items.length) return { inserted: 0 };
+
+  const reqId = crypto.randomUUID();
+
+  logger.info("Telemetry batch received", {
+    reqId,
+    count: items.length,
+  });
 
   const client = await db.getClient();
   try {
@@ -72,6 +143,7 @@ const insertTelemetryItems = async (items = []) => {
 
       if (!vehicleMasterId) {
         logger.warn("Telemetry item missing vehicle ID – skipping", {
+          reqId,
           itemKeys: Object.keys(item),
           sample: item,
         });
@@ -81,6 +153,7 @@ const insertTelemetryItems = async (items = []) => {
       vehicleMasterId = Number(vehicleMasterId);
       if (isNaN(vehicleMasterId) || vehicleMasterId <= 0) {
         logger.warn("Invalid vehicle_master_id (not a positive number)", {
+          reqId,
           received:
             item.vehicleIdOrMasterId ||
             item.vehicleMasterId ||
@@ -165,74 +238,102 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.motor_ac_output_voltage_raw),
       ];
 
-      await client.query(
-        `
-        INSERT INTO live_values (
-          vehicle_master_id, recorded_at,
-          soc_percent, stack_voltage_v, battery_status,
-          max_voltage_v, min_voltage_v, avg_voltage_v,
-          max_temp_c, min_temp_c, avg_temp_c,
-          battery_current_a,
-          charger_current_demand_a, charger_voltage_demand_v,
-          cell_voltages, temp_sensors,
-          motor_torque_limit, motor_torque_value, motor_speed_rpm,
-          motor_rotation_dir, motor_operation_mode, mcu_enable_state,
-          motor_ac_current_a, motor_ac_voltage_v, dc_side_voltage_v,
-          motor_temp_c, mcu_temp_c, radiator_temp_c,
-          dcdc_pri_a_mosfet_temp_c,
-          dcdc_sec_ls_mosfet_temp_c,
-          dcdc_sec_hs_mosfet_temp_c,
-          dcdc_pri_c_mosfet_temp_c,
-          dcdc_input_voltage_v,
-          dcdc_input_current_a,
-          dcdc_output_voltage_v,
-          dcdc_output_current_a,
-          dcdc_occurence_count,
-          total_running_hrs, last_trip_hrs,
-          total_kwh_consumed, last_trip_kwh,
-          alarms,
-          btms_command_mode, btms_hv_request, btms_charge_status,
-          bms_hv_relay_state, btms_target_temp_c, bms_pack_voltage_v,
-          bms_life_counter, btms_command_crc,
-          btms_status_mode, btms_hv_relay_state,
-          btms_inlet_temp_c, btms_outlet_temp_c, btms_demand_power_kw,
-          motor_status_word, motor_freq_raw, motor_total_wattage_w,
-          motor_dc_input_voltage_raw, motor_ac_output_voltage_raw
-        )
-        VALUES ($1, to_timestamp($2 / 1000.0), $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38::interval,$39::interval,$40,$41,$42::jsonb,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60)
-        `,
-        values
-      );
+      try {
+        await client.query(
+          `
+          INSERT INTO live_values (
+            vehicle_master_id, recorded_at,
+            soc_percent, stack_voltage_v, battery_status,
+            max_voltage_v, min_voltage_v, avg_voltage_v,
+            max_temp_c, min_temp_c, avg_temp_c,
+            battery_current_a,
+            charger_current_demand_a, charger_voltage_demand_v,
+            cell_voltages, temp_sensors,
+            motor_torque_limit, motor_torque_value, motor_speed_rpm,
+            motor_rotation_dir, motor_operation_mode, mcu_enable_state,
+            motor_ac_current_a, motor_ac_voltage_v, dc_side_voltage_v,
+            motor_temp_c, mcu_temp_c, radiator_temp_c,
+            dcdc_pri_a_mosfet_temp_c,
+            dcdc_sec_ls_mosfet_temp_c,
+            dcdc_sec_hs_mosfet_temp_c,
+            dcdc_pri_c_mosfet_temp_c,
+            dcdc_input_voltage_v,
+            dcdc_input_current_a,
+            dcdc_output_voltage_v,
+            dcdc_output_current_a,
+            dcdc_occurence_count,
+            total_running_hrs, last_trip_hrs,
+            total_kwh_consumed, last_trip_kwh,
+            alarms,
+            btms_command_mode, btms_hv_request, btms_charge_status,
+            bms_hv_relay_state, btms_target_temp_c, bms_pack_voltage_v,
+            bms_life_counter, btms_command_crc,
+            btms_status_mode, btms_hv_relay_state,
+            btms_inlet_temp_c, btms_outlet_temp_c, btms_demand_power_kw,
+            motor_status_word, motor_freq_raw, motor_total_wattage_w,
+            motor_dc_input_voltage_raw, motor_ac_output_voltage_raw
+          )
+          VALUES ($1, to_timestamp($2 / 1000.0), $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38::interval,$39::interval,$40,$41,$42::jsonb,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60)
+          `,
+          values
+        );
 
-      // Live socket push
-      if (io) {
-        io.to(`vehicle:${vehicleMasterId}`).emit("live_update", {
-          vehicleId: vehicleMasterId,
-          recorded_at: ts,
-          ...live,
+        // Live socket push
+        if (io) {
+          io.to(`vehicle:${vehicleMasterId}`).emit("live_update", {
+            vehicleId: vehicleMasterId,
+            recorded_at: ts,
+            ...live,
+          });
+        }
+
+        inserted++;
+      } catch (itemErr) {
+        const match = itemErr.where?.match(/\$(\d+)/);
+        let overflow = null;
+
+        if (match) {
+          const idx = Number(match[1]) - 1;
+          overflow = {
+            column: LIVE_VALUES_COLUMNS[idx],
+            value: values[idx],
+          };
+        }
+
+        logger.error("Telemetry item insert failed", {
+          reqId,
+          vehicleMasterId,
+          code: itemErr.code,
+          message: itemErr.message,
+          detail: itemErr.detail,
+          overflow,
         });
-      }
 
-      inserted++;
+        // continue to next item (fail-safe per-record insertion)
+        continue;
+      }
     }
 
     await client.query("COMMIT");
+
+    logger.info("Telemetry batch committed", {
+      reqId,
+      inserted,
+      totalReceived: items.length,
+    });
+
     return { inserted };
   } catch (err) {
     await client.query("ROLLBACK");
 
-    // ────────────────────────────────────────────────────────────────
-    //          Improved & much more debug-friendly error logging
-    // ────────────────────────────────────────────────────────────────
-    logger.error("Telemetry batch insert failed", {
+    logger.error("Telemetry batch insert failed (transaction rolled back)", {
+      reqId,
       message: err.message,
-      code: err.code,           // e.g. 23505, 42703, 22021...
-      detail: err.detail,       // very useful especially for constraint violations
+      code: err.code,
+      detail: err.detail,
       hint: err.hint,
       where: err.where,
-      stack: err.stack?.split("\n").slice(0, 8).join("\n"), // first 8 lines only
-      // Optional: add first failing item if you want (be careful with size)
-      // firstFailedItem: items[0] ? { ...items[0], live: "[truncated]" } : null,
+      stack: err.stack?.split("\n").slice(0, 8).join("\n"),
     });
 
     throw err;
