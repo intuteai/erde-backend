@@ -59,8 +59,8 @@ const insertTelemetryItems = async (items = []) => {
     for (const item of items) {
       const { ts, live = {} } = item;
 
-      // Extract vehicle_master_id flexibly – matches your TelemetryUploader.ts
-      let vehicleMasterId = 
+      // Extract vehicle_master_id flexibly
+      let vehicleMasterId =
         item.vehicleIdOrMasterId ||
         item.vehicleMasterId ||
         item.vehicle_master_id ||
@@ -81,26 +81,23 @@ const insertTelemetryItems = async (items = []) => {
       vehicleMasterId = Number(vehicleMasterId);
       if (isNaN(vehicleMasterId) || vehicleMasterId <= 0) {
         logger.warn("Invalid vehicle_master_id (not a positive number)", {
-          received: item.vehicleIdOrMasterId || item.vehicleMasterId || item.vehicleId,
+          received:
+            item.vehicleIdOrMasterId ||
+            item.vehicleMasterId ||
+            item.vehicleId ||
+            item.deviceId ||
+            item.device_id,
         });
         continue;
       }
 
-      const tempSensors = normalizeSnapshotArray(
-        live.temp_sensors,
-        TEMP_SENSOR_COUNT
-      );
-
-      const cellVoltages = normalizeSnapshotArray(
-        live.cell_voltages,
-        CELL_VOLTAGE_COUNT
-      );
+      const tempSensors = normalizeSnapshotArray(live.temp_sensors, TEMP_SENSOR_COUNT);
+      const cellVoltages = normalizeSnapshotArray(live.cell_voltages, CELL_VOLTAGE_COUNT);
 
       const values = [
         vehicleMasterId,
         ts,
-
-        // ================= BATTERY =================
+        // BATTERY
         toNum(live.soc_percent),
         toNum(live.stack_voltage_v),
         toText(live.battery_status),
@@ -113,12 +110,10 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.battery_current_a),
         toNum(live.charger_current_demand_a),
         toNum(live.charger_voltage_demand_v),
-
-        // ================= MODULES =================
+        // ARRAYS
         cellVoltages,
         tempSensors,
-
-        // ================= MOTOR / MCU =================
+        // MOTOR / MCU
         toNum(live.motor_torque_limit),
         toNum(live.motor_torque_value),
         live.motor_speed_rpm ?? null,
@@ -131,8 +126,7 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.motor_temp_c),
         toNum(live.mcu_temp_c),
         toNum(live.radiator_temp_c),
-
-        // ================= DCDC =================
+        // DCDC
         toNum(live.dcdc_pri_a_mosfet_temp_c),
         toNum(live.dcdc_sec_ls_mosfet_temp_c),
         toNum(live.dcdc_sec_hs_mosfet_temp_c),
@@ -142,17 +136,14 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.dcdc_output_voltage_v),
         toNum(live.dcdc_output_current_a),
         live.dcdc_occurence_count ?? null,
-
-        // ================= ODO / ENERGY =================
+        // ODO / ENERGY
         toInterval(live.total_running_hrs),
         toInterval(live.last_trip_hrs),
         toNum(live.total_kwh_consumed),
         toNum(live.last_trip_kwh),
-
-        // ================= ALARMS =================
+        // ALARMS
         live.alarms ? JSON.stringify(live.alarms) : JSON.stringify({}),
-
-        // ================= NEW BTMS / BMS THERMAL FIELDS =================
+        // BTMS / BMS THERMAL
         toNum(live.btms_command_mode),
         toNum(live.btms_hv_request),
         toNum(live.btms_charge_status),
@@ -166,8 +157,7 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.btms_inlet_temp_c),
         toNum(live.btms_outlet_temp_c),
         toNum(live.btms_demand_power_kw),
-
-        // ================= NEW MOTOR / INVERTER RAW FIELDS =================
+        // MOTOR / INVERTER RAW
         toNum(live.motor_status_word),
         toNum(live.motor_freq_raw),
         toNum(live.motor_total_wattage_w),
@@ -209,33 +199,12 @@ const insertTelemetryItems = async (items = []) => {
           motor_status_word, motor_freq_raw, motor_total_wattage_w,
           motor_dc_input_voltage_raw, motor_ac_output_voltage_raw
         )
-        VALUES (
-          $1, to_timestamp($2 / 1000.0),
-          $3, $4, $5,
-          $6, $7, $8,
-          $9, $10, $11,
-          $12, $13, $14,
-          $15::numeric[], $16::numeric[],
-          $17, $18, $19,
-          $20, $21, $22,
-          $23, $24, $25,
-          $26, $27, $28,
-          $29, $30, $31, $32,
-          $33, $34, $35, $36, $37,
-          $38::interval, $39::interval,
-          $40, $41,
-          $42::jsonb,
-          $43, $44, $45, $46, $47, $48, $49, $50,
-          $51, $52, $53, $54, $55,
-          $56, $57, $58, $59, $60
-        )
+        VALUES ($1, to_timestamp($2 / 1000.0), $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38::interval,$39::interval,$40,$41,$42::jsonb,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60)
         `,
         values
       );
 
-      /* =========================
-         LIVE SOCKET PUSH (SAFE)
-      ========================= */
+      // Live socket push
       if (io) {
         io.to(`vehicle:${vehicleMasterId}`).emit("live_update", {
           vehicleId: vehicleMasterId,
@@ -251,7 +220,21 @@ const insertTelemetryItems = async (items = []) => {
     return { inserted };
   } catch (err) {
     await client.query("ROLLBACK");
-    logger.error("Telemetry insert failed:", err);
+
+    // ────────────────────────────────────────────────────────────────
+    //          Improved & much more debug-friendly error logging
+    // ────────────────────────────────────────────────────────────────
+    logger.error("Telemetry batch insert failed", {
+      message: err.message,
+      code: err.code,           // e.g. 23505, 42703, 22021...
+      detail: err.detail,       // very useful especially for constraint violations
+      hint: err.hint,
+      where: err.where,
+      stack: err.stack?.split("\n").slice(0, 8).join("\n"), // first 8 lines only
+      // Optional: add first failing item if you want (be careful with size)
+      // firstFailedItem: items[0] ? { ...items[0], live: "[truncated]" } : null,
+    });
+
     throw err;
   } finally {
     client.release();
