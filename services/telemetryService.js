@@ -23,6 +23,11 @@ const toNum = (v) =>
 
 const toText = (v) => (v === null || v === undefined ? null : String(v));
 
+const toJsonb = (v) => {
+  if (!v || typeof v !== "object") return null;
+  return JSON.stringify(v);
+};
+
 const normalizeSnapshotArray = (arr, expectedLength) => {
   if (!Array.isArray(arr)) return null;
 
@@ -62,6 +67,8 @@ const LIVE_VALUES_COLUMNS = [
   "charger_voltage_demand_v",
   "cell_voltages",
   "temp_sensors",
+  "cell_modules",       // ← added
+  "temp_modules",       // ← added
   "motor_torque_limit",
   "motor_torque_value",
   "motor_speed_rpm",
@@ -183,9 +190,12 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.battery_current_a),
         toNum(live.charger_current_demand_a),
         toNum(live.charger_voltage_demand_v),
-        // ARRAYS
+        // ARRAYS (legacy)
         cellVoltages,
         tempSensors,
+        // MODULE-WISE (new)
+        toJsonb(live.cell_modules),
+        toJsonb(live.temp_modules),
         // MOTOR / MCU
         toNum(live.motor_torque_limit),
         toNum(live.motor_torque_value),
@@ -249,6 +259,7 @@ const insertTelemetryItems = async (items = []) => {
             battery_current_a,
             charger_current_demand_a, charger_voltage_demand_v,
             cell_voltages, temp_sensors,
+            cell_modules, temp_modules,           -- ← added
             motor_torque_limit, motor_torque_value, motor_speed_rpm,
             motor_rotation_dir, motor_operation_mode, mcu_enable_state,
             motor_ac_current_a, motor_ac_voltage_v, dc_side_voltage_v,
@@ -273,7 +284,7 @@ const insertTelemetryItems = async (items = []) => {
             motor_status_word, motor_freq_raw, motor_total_wattage_w,
             motor_dc_input_voltage_raw, motor_ac_output_voltage_raw
           )
-          VALUES ($1, to_timestamp($2 / 1000.0), $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38::interval,$39::interval,$40,$41,$42::jsonb,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60)
+          VALUES ($1, to_timestamp($2 / 1000.0), $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18::jsonb,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38::interval,$39::interval,$40,$41,$42::jsonb,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60)
           `,
           values
         );
