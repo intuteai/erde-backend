@@ -7,17 +7,18 @@ const logger = require('./utils/logger');
    ROUTES
 ========================= */
 const authRoutes             = require('./routes/auth.js');
-const userRoutes             = require('./routes/user.js');           // ← NEW: User management (change password, etc.)
+const userRoutes             = require('./routes/user.js');           
 const customerRoutes         = require('./routes/customer.js');
 const vehicleTypeRoutes      = require('./routes/vehicleType.js');
 const vehicleCategoryRoutes  = require('./routes/vehicleCategory.js');
 const vehicleMasterRoutes    = require('./routes/vehicle-master.js');
-const vehicleRoutes          = require('./routes/vehicle.js');        // ← Includes /stream (SSE)
+const vehicleRoutes          = require('./routes/vehicle.js');        
 const batteryRoutes          = require('./routes/battery.js');
 const motorRoutes            = require('./routes/motor.js');
 const faultsRoutes           = require('./routes/faults.js');
 const configRoutes           = require('./routes/config.js');
 const telemetryRoutes        = require('./routes/telemetry.js');
+const locationRoutes         = require('./routes/location.js');   // ✅ NEW
 const databaseLogsRoutes     = require('./routes/databaseLogs.js');
 const vcuRoutes              = require('./routes/vcu.js');
 const hmiRoutes              = require('./routes/hmi.js');
@@ -70,14 +71,12 @@ app.get('/health', (req, res) => {
 /* =========================
    PROTECTED ROUTES
 ========================= */
-// Public but rate-limited user actions (e.g., change password)
-app.use('/api/user', generalLimiter, userRoutes);  // ← NEW ROUTE GROUP
-
+app.use('/api/user',               generalLimiter, userRoutes);
 app.use('/api/customers',          generalLimiter, customerRoutes);
 app.use('/api/vehicle-types',      generalLimiter, vehicleTypeRoutes);
 app.use('/api/vehicle-categories', generalLimiter, vehicleCategoryRoutes);
 app.use('/api/vehicle-master',     generalLimiter, vehicleMasterRoutes);
-app.use('/vehicle-master',         generalLimiter, vehicleMasterRoutes); // legacy support
+app.use('/vehicle-master',         generalLimiter, vehicleMasterRoutes); // legacy
 app.use('/api/vehicles',           generalLimiter, vehicleRoutes);
 app.use('/api/battery',            generalLimiter, batteryRoutes);
 app.use('/api/motor',              generalLimiter, motorRoutes);
@@ -85,6 +84,7 @@ app.use('/api/faults',             generalLimiter, faultsRoutes);
 app.use('/api/database-logs',      generalLimiter, databaseLogsRoutes);
 app.use('/api/config',             generalLimiter, configRoutes);
 app.use('/api/telemetry',          generalLimiter, telemetryRoutes);
+app.use('/api/location',           generalLimiter, locationRoutes);   // ✅ NEW
 app.use('/api/vcu',                generalLimiter, vcuRoutes);
 app.use('/api/hmi',                generalLimiter, hmiRoutes);
 
