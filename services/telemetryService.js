@@ -67,8 +67,7 @@ const LIVE_VALUES_COLUMNS = [
   "charger_voltage_demand_v",
   "cell_voltages",
   "temp_sensors",
-  "cell_modules",       // ← added
-  "temp_modules",       // ← added
+
   "motor_torque_limit",
   "motor_torque_value",
   "motor_speed_rpm",
@@ -81,6 +80,13 @@ const LIVE_VALUES_COLUMNS = [
   "motor_temp_c",
   "mcu_temp_c",
   "radiator_temp_c",
+
+  "total_running_hrs",
+  "last_trip_hrs",
+  "total_kwh_consumed",
+  "last_trip_kwh",
+  "alarms",
+
   "dcdc_pri_a_mosfet_temp_c",
   "dcdc_sec_ls_mosfet_temp_c",
   "dcdc_sec_hs_mosfet_temp_c",
@@ -90,11 +96,7 @@ const LIVE_VALUES_COLUMNS = [
   "dcdc_output_voltage_v",
   "dcdc_output_current_a",
   "dcdc_occurence_count",
-  "total_running_hrs",
-  "last_trip_hrs",
-  "total_kwh_consumed",
-  "last_trip_kwh",
-  "alarms",
+
   "btms_command_mode",
   "btms_hv_request",
   "btms_charge_status",
@@ -108,11 +110,16 @@ const LIVE_VALUES_COLUMNS = [
   "btms_inlet_temp_c",
   "btms_outlet_temp_c",
   "btms_demand_power_kw",
+
   "motor_status_word",
   "motor_freq_raw",
   "motor_total_wattage_w",
   "motor_dc_input_voltage_raw",
   "motor_ac_output_voltage_raw",
+
+  // MUST BE LAST (matches DB column order)
+  "cell_modules",
+  "temp_modules",
 ];
 
 /* =========================
@@ -159,15 +166,7 @@ const insertTelemetryItems = async (items = []) => {
 
       vehicleMasterId = Number(vehicleMasterId);
       if (isNaN(vehicleMasterId) || vehicleMasterId <= 0) {
-        logger.warn("Invalid vehicle_master_id (not a positive number)", {
-          reqId,
-          received:
-            item.vehicleIdOrMasterId ||
-            item.vehicleMasterId ||
-            item.vehicleId ||
-            item.deviceId ||
-            item.device_id,
-        });
+        logger.warn("Invalid vehicle_master_id (not a positive number)", { reqId });
         continue;
       }
 
@@ -193,9 +192,6 @@ const insertTelemetryItems = async (items = []) => {
         // ARRAYS (legacy)
         cellVoltages,
         tempSensors,
-        // MODULE-WISE (new)
-        toJsonb(live.cell_modules),
-        toJsonb(live.temp_modules),
         // MOTOR / MCU
         toNum(live.motor_torque_limit),
         toNum(live.motor_torque_value),
@@ -209,6 +205,13 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.motor_temp_c),
         toNum(live.mcu_temp_c),
         toNum(live.radiator_temp_c),
+        // ODO / ENERGY
+        toInterval(live.total_running_hrs),
+        toInterval(live.last_trip_hrs),
+        toNum(live.total_kwh_consumed),
+        toNum(live.last_trip_kwh),
+        // ALARMS
+        live.alarms ? JSON.stringify(live.alarms) : JSON.stringify({}),
         // DCDC
         toNum(live.dcdc_pri_a_mosfet_temp_c),
         toNum(live.dcdc_sec_ls_mosfet_temp_c),
@@ -219,13 +222,6 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.dcdc_output_voltage_v),
         toNum(live.dcdc_output_current_a),
         live.dcdc_occurence_count ?? null,
-        // ODO / ENERGY
-        toInterval(live.total_running_hrs),
-        toInterval(live.last_trip_hrs),
-        toNum(live.total_kwh_consumed),
-        toNum(live.last_trip_kwh),
-        // ALARMS
-        live.alarms ? JSON.stringify(live.alarms) : JSON.stringify({}),
         // BTMS / BMS THERMAL
         toNum(live.btms_command_mode),
         toNum(live.btms_hv_request),
@@ -246,7 +242,18 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.motor_total_wattage_w),
         toNum(live.motor_dc_input_voltage_raw),
         toNum(live.motor_ac_output_voltage_raw),
+
+        // MUST BE LAST — jsonb columns
+        toJsonb(live.cell_modules),
+        toJsonb(live.temp_modules),
       ];
+
+      // ← Hard safety check (prevents column/values mismatch forever)
+      if (values.length !== LIVE_VALUES_COLUMNS.length) {
+        throw new Error(
+          `SQL mismatch: columns=${LIVE_VALUES_COLUMNS.length}, values=${values.length}`
+        );
+      }
 
       try {
         await client.query(
@@ -259,11 +266,13 @@ const insertTelemetryItems = async (items = []) => {
             battery_current_a,
             charger_current_demand_a, charger_voltage_demand_v,
             cell_voltages, temp_sensors,
-            cell_modules, temp_modules,           -- ← added
             motor_torque_limit, motor_torque_value, motor_speed_rpm,
             motor_rotation_dir, motor_operation_mode, mcu_enable_state,
             motor_ac_current_a, motor_ac_voltage_v, dc_side_voltage_v,
             motor_temp_c, mcu_temp_c, radiator_temp_c,
+            total_running_hrs, last_trip_hrs,
+            total_kwh_consumed, last_trip_kwh,
+            alarms,
             dcdc_pri_a_mosfet_temp_c,
             dcdc_sec_ls_mosfet_temp_c,
             dcdc_sec_hs_mosfet_temp_c,
@@ -273,18 +282,16 @@ const insertTelemetryItems = async (items = []) => {
             dcdc_output_voltage_v,
             dcdc_output_current_a,
             dcdc_occurence_count,
-            total_running_hrs, last_trip_hrs,
-            total_kwh_consumed, last_trip_kwh,
-            alarms,
             btms_command_mode, btms_hv_request, btms_charge_status,
             bms_hv_relay_state, btms_target_temp_c, bms_pack_voltage_v,
             bms_life_counter, btms_command_crc,
             btms_status_mode, btms_hv_relay_state,
             btms_inlet_temp_c, btms_outlet_temp_c, btms_demand_power_kw,
             motor_status_word, motor_freq_raw, motor_total_wattage_w,
-            motor_dc_input_voltage_raw, motor_ac_output_voltage_raw
+            motor_dc_input_voltage_raw, motor_ac_output_voltage_raw,
+            cell_modules, temp_modules
           )
-          VALUES ($1, to_timestamp($2 / 1000.0), $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18::jsonb,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38::interval,$39::interval,$40,$41,$42::jsonb,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60)
+          VALUES ($1, to_timestamp($2 / 1000.0), $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61::jsonb,$62::jsonb)
           `,
           values
         );
@@ -320,7 +327,6 @@ const insertTelemetryItems = async (items = []) => {
           overflow,
         });
 
-        // continue to next item (fail-safe per-record insertion)
         continue;
       }
     }
