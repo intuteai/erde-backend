@@ -6,22 +6,23 @@ const logger = require('./utils/logger');
 /* =========================
    ROUTES
 ========================= */
-const authRoutes             = require('./routes/auth.js');
-const userRoutes             = require('./routes/user.js');           
-const customerRoutes         = require('./routes/customer.js');
-const vehicleTypeRoutes      = require('./routes/vehicleType.js');
-const vehicleCategoryRoutes  = require('./routes/vehicleCategory.js');
-const vehicleMasterRoutes    = require('./routes/vehicle-master.js');
-const vehicleRoutes          = require('./routes/vehicle.js');        
-const batteryRoutes          = require('./routes/battery.js');
-const motorRoutes            = require('./routes/motor.js');
-const faultsRoutes           = require('./routes/faults.js');
-const configRoutes           = require('./routes/config.js');
-const telemetryRoutes        = require('./routes/telemetry.js');
-const locationRoutes         = require('./routes/location.js');   // ✅ NEW
-const databaseLogsRoutes     = require('./routes/databaseLogs.js');
-const vcuRoutes              = require('./routes/vcu.js');
-const hmiRoutes              = require('./routes/hmi.js');
+const authRoutes              = require('./routes/auth.js');
+const userRoutes              = require('./routes/user.js');
+const customerRoutes          = require('./routes/customer.js');
+const vehicleTypeRoutes       = require('./routes/vehicleType.js');
+const vehicleCategoryRoutes   = require('./routes/vehicleCategory.js');
+const vehicleMasterRoutes     = require('./routes/vehicle-master.js');
+const vehicleRoutes           = require('./routes/vehicle.js');
+const batteryRoutes           = require('./routes/battery.js');
+const motorRoutes             = require('./routes/motor.js');
+const faultsRoutes            = require('./routes/faults.js');
+const configRoutes            = require('./routes/config.js');
+const telemetryRoutes         = require('./routes/telemetry.js');
+const locationRoutes          = require('./routes/location.js');
+const databaseLogsRoutes      = require('./routes/databaseLogs.js');
+const databaseLogsExportRoutes= require('./routes/database-logs-export.js'); // ✅ NEW
+const vcuRoutes               = require('./routes/vcu.js');
+const hmiRoutes               = require('./routes/hmi.js');
 
 /* =========================
    RATE LIMITERS
@@ -56,6 +57,9 @@ app.use(
   })
 );
 
+/* =========================
+   BODY PARSERS
+========================= */
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -65,7 +69,10 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/api/auth', authRoutes);
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+  });
 });
 
 /* =========================
@@ -75,18 +82,23 @@ app.use('/api/user',               generalLimiter, userRoutes);
 app.use('/api/customers',          generalLimiter, customerRoutes);
 app.use('/api/vehicle-types',      generalLimiter, vehicleTypeRoutes);
 app.use('/api/vehicle-categories', generalLimiter, vehicleCategoryRoutes);
+
 app.use('/api/vehicle-master',     generalLimiter, vehicleMasterRoutes);
 app.use('/vehicle-master',         generalLimiter, vehicleMasterRoutes); // legacy
+
 app.use('/api/vehicles',           generalLimiter, vehicleRoutes);
 app.use('/api/battery',            generalLimiter, batteryRoutes);
 app.use('/api/motor',              generalLimiter, motorRoutes);
 app.use('/api/faults',             generalLimiter, faultsRoutes);
-app.use('/api/database-logs',      generalLimiter, databaseLogsRoutes);
-app.use('/api/config',             generalLimiter, configRoutes);
-app.use('/api/telemetry',          generalLimiter, telemetryRoutes);
-app.use('/api/location',           generalLimiter, locationRoutes);   // ✅ NEW
-app.use('/api/vcu',                generalLimiter, vcuRoutes);
-app.use('/api/hmi',                generalLimiter, hmiRoutes);
+
+app.use('/api/database-logs',       generalLimiter, databaseLogsRoutes);
+app.use('/api/database-logs',       generalLimiter, databaseLogsExportRoutes); // ✅ EXPORT ROUTES
+
+app.use('/api/config',              generalLimiter, configRoutes);
+app.use('/api/telemetry',           generalLimiter, telemetryRoutes);
+app.use('/api/location',            generalLimiter, locationRoutes);
+app.use('/api/vcu',                 generalLimiter, vcuRoutes);
+app.use('/api/hmi',                 generalLimiter, hmiRoutes);
 
 /* =========================
    404 HANDLER
@@ -99,11 +111,15 @@ app.use('*', (req, res) => {
    GLOBAL ERROR HANDLER
 ========================= */
 app.use((err, req, res, next) => {
-  logger.error(`Unhandled error: ${err.message}`, { stack: err.stack });
+  logger.error(`Unhandled error: ${err.message}`, {
+    stack: err.stack,
+  });
+
   res.status(err.status || 500).json({
-    error: process.env.NODE_ENV === 'production'
-      ? 'Internal server error'
-      : err.message,
+    error:
+      process.env.NODE_ENV === 'production'
+        ? 'Internal server error'
+        : err.message,
   });
 });
 
