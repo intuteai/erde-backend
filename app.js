@@ -6,23 +6,24 @@ const logger = require('./utils/logger');
 /* =========================
    ROUTES
 ========================= */
-const authRoutes              = require('./routes/auth.js');
-const userRoutes              = require('./routes/user.js');
-const customerRoutes          = require('./routes/customer.js');
-const vehicleTypeRoutes       = require('./routes/vehicleType.js');
-const vehicleCategoryRoutes   = require('./routes/vehicleCategory.js');
-const vehicleMasterRoutes     = require('./routes/vehicle-master.js');
-const vehicleRoutes           = require('./routes/vehicle.js');
-const batteryRoutes           = require('./routes/battery.js');
-const motorRoutes             = require('./routes/motor.js');
-const faultsRoutes            = require('./routes/faults.js');
-const configRoutes            = require('./routes/config.js');
-const telemetryRoutes         = require('./routes/telemetry.js');
-const locationRoutes          = require('./routes/location.js');
-const databaseLogsRoutes      = require('./routes/databaseLogs.js');
-const databaseLogsExportRoutes= require('./routes/database-logs-export.js'); // ✅ NEW
-const vcuRoutes               = require('./routes/vcu.js');
-const hmiRoutes               = require('./routes/hmi.js');
+const authRoutes               = require('./routes/auth.js');
+const userRoutes               = require('./routes/user.js');
+const customerRoutes           = require('./routes/customer.js');
+const vehicleTypeRoutes        = require('./routes/vehicleType.js');
+const vehicleCategoryRoutes    = require('./routes/vehicleCategory.js');
+const vehicleMasterRoutes      = require('./routes/vehicle-master.js');
+const vehicleRoutes            = require('./routes/vehicle.js');
+const vehicleLocationRoutes    = require('./routes/vehicleLocation.js'); // ✅ NEW
+const batteryRoutes            = require('./routes/battery.js');
+const motorRoutes              = require('./routes/motor.js');
+const faultsRoutes             = require('./routes/faults.js');
+const configRoutes             = require('./routes/config.js');
+const telemetryRoutes          = require('./routes/telemetry.js');
+const locationRoutes           = require('./routes/location.js');
+const databaseLogsRoutes       = require('./routes/databaseLogs.js');
+const databaseLogsExportRoutes = require('./routes/database-logs-export.js');
+const vcuRoutes                = require('./routes/vcu.js');
+const hmiRoutes                = require('./routes/hmi.js');
 
 /* =========================
    RATE LIMITERS
@@ -87,12 +88,14 @@ app.use('/api/vehicle-master',     generalLimiter, vehicleMasterRoutes);
 app.use('/vehicle-master',         generalLimiter, vehicleMasterRoutes); // legacy
 
 app.use('/api/vehicles',           generalLimiter, vehicleRoutes);
+app.use('/api/vehicles',           generalLimiter, vehicleLocationRoutes); // ✅ LIVE LOCATION SSE
+
 app.use('/api/battery',            generalLimiter, batteryRoutes);
 app.use('/api/motor',              generalLimiter, motorRoutes);
 app.use('/api/faults',             generalLimiter, faultsRoutes);
 
 app.use('/api/database-logs',       generalLimiter, databaseLogsRoutes);
-app.use('/api/database-logs',       generalLimiter, databaseLogsExportRoutes); // ✅ EXPORT ROUTES
+app.use('/api/database-logs',       generalLimiter, databaseLogsExportRoutes);
 
 app.use('/api/config',              generalLimiter, configRoutes);
 app.use('/api/telemetry',           generalLimiter, telemetryRoutes);
