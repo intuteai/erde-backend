@@ -53,6 +53,19 @@ async function buildTimeFilter(req, vehicleId) {
 }
 
 /* -------------------------------------------------------
+   CSV-safe IST timestamp formatting
+   → Outputs: "2026-01-23 14:35:22"  (quoted when used)
+------------------------------------------------------- */
+function formatRecordedAtForCSV(ts) {
+  return ts.toLocaleString('sv-SE', {
+    timeZone: 'Asia/Kolkata',
+    hour12: false,
+  }).replace('T', ' ');
+}
+
+const CSV_SAFE_TIMESTAMP = (ts) => `"${formatRecordedAtForCSV(ts)}"`;
+
+/* -------------------------------------------------------
    CELL VOLTAGE EXPORT
 ------------------------------------------------------- */
 router.get(
@@ -65,11 +78,11 @@ router.get(
     const isCustomer = req.user.role === 'customer';
 
     if (!id || isNaN(Number(id))) {
-      return res.status(400).json([]);
+      return res.status(400).json({ error: 'Invalid vehicle ID' });
     }
 
     try {
-      // ---- ownership check (same as logs)
+      // Ownership check
       const ownership = await db.query(
         `
         SELECT 1
@@ -82,12 +95,11 @@ router.get(
       );
 
       if (!ownership.rows.length) {
-        return res.status(403).json([]);
+        return res.status(403).json({ error: 'Forbidden' });
       }
 
       const { timeClause, params } = await buildTimeFilter(req, id);
 
-      // ---- fetch raw data
       const result = await db.query(
         `
         SELECT recorded_at, cell_modules
@@ -102,10 +114,9 @@ router.get(
 
       const rows = result.rows || [];
 
-      // ---- determine structure
+      // Determine max structure
       let maxModules = 0;
       let maxCells = 0;
-
       for (const r of rows) {
         if (Array.isArray(r.cell_modules)) {
           maxModules = Math.max(maxModules, r.cell_modules.length);
@@ -115,7 +126,6 @@ router.get(
         }
       }
 
-      // ---- headers
       const headers = ['recorded_at'];
       for (let m = 1; m <= maxModules; m++) {
         for (let c = 1; c <= maxCells; c++) {
@@ -123,23 +133,25 @@ router.get(
         }
       }
 
-      // ---- CSV stream
-      res.setHeader('Content-Type', 'text/csv');
+      // CSV headers & stream
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader(
         'Content-Disposition',
         `attachment; filename="vehicle_${id}_cell_voltages.csv"`
       );
 
+      // UTF-8 BOM (helps Excel open correctly with proper encoding)
+      res.write('\uFEFF');
+
       res.write(headers.join(',') + '\n');
 
       for (const r of rows) {
         const row = new Array(headers.length).fill('');
-        row[0] = r.recorded_at.toISOString();
+        row[0] = CSV_SAFE_TIMESTAMP(r.recorded_at);
 
         r.cell_modules?.forEach((module, mi) => {
           module?.forEach((val, ci) => {
-            const col =
-              1 + mi * maxCells + ci;
+            const col = 1 + mi * maxCells + ci;
             row[col] = val ?? '';
           });
         });
@@ -148,10 +160,9 @@ router.get(
       }
 
       res.end();
-
     } catch (err) {
       logger.error(`Cell export failed (vehicle ${id}): ${err.message}`);
-      res.status(500).json([]);
+      res.status(500).json({ error: 'Export failed' });
     }
   }
 );
@@ -169,7 +180,7 @@ router.get(
     const isCustomer = req.user.role === 'customer';
 
     if (!id || isNaN(Number(id))) {
-      return res.status(400).json([]);
+      return res.status(400).json({ error: 'Invalid vehicle ID' });
     }
 
     try {
@@ -185,7 +196,7 @@ router.get(
       );
 
       if (!ownership.rows.length) {
-        return res.status(403).json([]);
+        return res.status(403).json({ error: 'Forbidden' });
       }
 
       const { timeClause, params } = await buildTimeFilter(req, id);
@@ -206,7 +217,6 @@ router.get(
 
       let maxModules = 0;
       let maxSensors = 0;
-
       for (const r of rows) {
         if (Array.isArray(r.temp_modules)) {
           maxModules = Math.max(maxModules, r.temp_modules.length);
@@ -223,22 +233,23 @@ router.get(
         }
       }
 
-      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader(
         'Content-Disposition',
         `attachment; filename="vehicle_${id}_temperature_sensors.csv"`
       );
 
+      res.write('\uFEFF');
+
       res.write(headers.join(',') + '\n');
 
       for (const r of rows) {
         const row = new Array(headers.length).fill('');
-        row[0] = r.recorded_at.toISOString();
+        row[0] = CSV_SAFE_TIMESTAMP(r.recorded_at);
 
         r.temp_modules?.forEach((module, mi) => {
           module?.forEach((val, ti) => {
-            const col =
-              1 + mi * maxSensors + ti;
+            const col = 1 + mi * maxSensors + ti;
             row[col] = val ?? '';
           });
         });
@@ -247,10 +258,9 @@ router.get(
       }
 
       res.end();
-
     } catch (err) {
       logger.error(`Temp export failed (vehicle ${id}): ${err.message}`);
-      res.status(500).json([]);
+      res.status(500).json({ error: 'Export failed' });
     }
   }
 );
