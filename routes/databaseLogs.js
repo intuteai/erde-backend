@@ -153,7 +153,8 @@ router.get(
           motor_freq_raw,
           motor_total_wattage_w,
           motor_dc_input_voltage_raw,
-          motor_ac_output_voltage_raw
+          motor_ac_output_voltage_raw,
+          ROUND(CAST((stack_voltage_v * ABS(battery_current_a)) / 1000.0 AS numeric), 3) AS output_power_kw
         FROM live_values
         WHERE vehicle_master_id = $1
           AND ${timeClause}
@@ -297,6 +298,7 @@ router.get(
 /**
  * GET /api/database-logs/:id/export
  * STREAMING CSV export - handles millions of rows without timeout
+ * Automatically excludes columns that are completely empty
  */
 router.get(
   '/:id/export',
@@ -396,6 +398,7 @@ router.get(
         { key: 'battery_status', label: 'Battery Status' },
         { key: 'stack_voltage_v', label: 'Stack Voltage (V)' },
         { key: 'battery_current_a', label: 'Battery Current (A)' },
+        { key: 'output_power_kw', label: 'Output Power (kW)' },
         { key: 'charger_current_demand_a', label: 'Charger Current Demand (A)' },
         { key: 'charger_voltage_demand_v', label: 'Charger Voltage Demand (V)' },
         { key: 'max_voltage_v', label: 'Max Cell Voltage (V)' },
@@ -461,19 +464,11 @@ router.get(
       const selectFields = columnKeys.map(key => {
         if (key === 'total_running_hrs' || key === 'last_trip_hrs') {
           return `to_char(${key}, 'HH24:MI:SS') AS ${key}`;
+        } else if (key === 'output_power_kw') {
+          return `ROUND(CAST((stack_voltage_v * ABS(battery_current_a)) / 1000.0 AS numeric), 3) AS output_power_kw`;
         }
         return key;
       }).join(',\n          ');
-
-      // ---------------- STREAMING QUERY ----------------
-      const query = `
-        SELECT
-          ${selectFields}
-        FROM live_values
-        WHERE vehicle_master_id = $1
-          AND ${timeClause}
-        ORDER BY recorded_at ASC
-      `;
 
       // Get a dedicated client for cursor-based streaming
       client = await db.getClient();
@@ -490,25 +485,107 @@ router.get(
 
       logger.info(`Starting export for vehicle ${id}: ${totalRows} total rows`);
 
-      // Set headers for CSV download
+      // ---------------- STEP 1: DETECT EMPTY COLUMNS ACROSS ENTIRE DATASET ----------------
+      // Build COUNT queries for each column to check if it has any non-null values
+      const columnCheckPromises = columnKeys.map(async (key) => {
+        // Skip timestamp - it's always populated
+        if (key === 'recorded_at') {
+          return { key, hasData: true };
+        }
+
+        let countQuery;
+        if (key === 'output_power_kw') {
+          // For calculated column, check the source columns
+          countQuery = `
+            SELECT COUNT(*) as count
+            FROM live_values
+            WHERE vehicle_master_id = $1
+              AND ${timeClause}
+              AND stack_voltage_v IS NOT NULL
+              AND battery_current_a IS NOT NULL
+            LIMIT 1
+          `;
+        } else if (key === 'total_running_hrs' || key === 'last_trip_hrs') {
+          // For interval columns formatted with to_char
+          const baseColumn = key; // these are actual columns in the table
+          countQuery = `
+            SELECT COUNT(*) as count
+            FROM live_values
+            WHERE vehicle_master_id = $1
+              AND ${timeClause}
+              AND ${baseColumn} IS NOT NULL
+            LIMIT 1
+          `;
+        } else {
+          // For regular columns
+          countQuery = `
+            SELECT COUNT(*) as count
+            FROM live_values
+            WHERE vehicle_master_id = $1
+              AND ${timeClause}
+              AND ${key} IS NOT NULL
+            LIMIT 1
+          `;
+        }
+
+        const result = await client.query(countQuery, params);
+        const hasData = parseInt(result.rows[0].count, 10) > 0;
+        return { key, hasData };
+      });
+
+      const columnCheckResults = await Promise.all(columnCheckPromises);
+
+      // Build map of which columns have data
+      const columnHasData = {};
+      columnCheckResults.forEach(({ key, hasData }) => {
+        columnHasData[key] = hasData;
+      });
+
+      // Filter out completely empty columns
+      const activeColumnKeys = columnKeys.filter(key => columnHasData[key]);
+      const activeColumnLabels = columnLabels.filter((_, idx) => columnHasData[columnKeys[idx]]);
+
+      if (activeColumnKeys.length === 0) {
+        logger.warn(`No data columns found for vehicle ${id}`);
+        return res.status(400).json({ error: 'No data available in selected columns' });
+      }
+
+      const excludedCount = columnKeys.length - activeColumnKeys.length;
+      if (excludedCount > 0) {
+        logger.info(`Excluded ${excludedCount} empty columns. Active columns: ${activeColumnKeys.length}/${columnKeys.length}`);
+      } else {
+        logger.info(`All ${activeColumnKeys.length} columns have data`);
+      }
+
+      // ---------------- STEP 2: STREAMING EXPORT ----------------
       const filename = `telemetry_${id}_${period || date || `${start}_to_${end}`}_${Date.now()}.csv`;
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
       res.setHeader('Transfer-Encoding', 'chunked');
-      res.setHeader('X-Total-Rows', totalRows.toString()); // Send total for progress calculation
+      res.setHeader('X-Total-Rows', totalRows.toString());
 
-      // Write CSV header
-      const csvHeader = columnLabels.map(label => `"${label}"`).join(',') + '\n';
+      // Write CSV header (only active columns)
+      const csvHeader = activeColumnLabels.map(label => `"${label}"`).join(',') + '\n';
       res.write(csvHeader);
 
       let rowCount = 0;
       let chunkCount = 0;
-      const CHUNK_SIZE = 5000; // Process 5000 rows at a time
+      const CHUNK_SIZE = 5000;
 
       // Use cursor for memory-efficient streaming
       const cursorName = `export_cursor_${Date.now()}`;
+      
+      const fullQuery = `
+        SELECT
+          ${selectFields}
+        FROM live_values
+        WHERE vehicle_master_id = $1
+          AND ${timeClause}
+        ORDER BY recorded_at ASC
+      `;
+
       await client.query('BEGIN');
-      await client.query(`DECLARE ${cursorName} CURSOR FOR ${query}`, params);
+      await client.query(`DECLARE ${cursorName} CURSOR FOR ${fullQuery}`, params);
 
       while (true) {
         const { rows } = await client.query(`FETCH ${CHUNK_SIZE} FROM ${cursorName}`);
@@ -517,9 +594,9 @@ router.get(
 
         chunkCount++;
         
-        // Convert rows to CSV format
+        // Convert rows to CSV format (only active columns)
         const csvChunk = rows.map(row => {
-          return columnKeys.map(key => {
+          return activeColumnKeys.map(key => {
             let val = row[key];
             
             // Format timestamp
@@ -558,7 +635,7 @@ router.get(
       await client.query(`CLOSE ${cursorName}`);
       await client.query('COMMIT');
 
-      logger.info(`Export completed: ${rowCount} rows for vehicle ${id}`);
+      logger.info(`Export completed: ${rowCount} rows, ${activeColumnKeys.length} columns for vehicle ${id}`);
       res.end();
 
     } catch (err) {

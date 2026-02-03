@@ -7,15 +7,21 @@ const logger = require('../utils/logger');
 
 /* ============================================================
    HELPER: Determine vehicle status based on last seen timestamp
+   - Uses milliseconds for precision and consistency with frontend
+   - Online: last seen within 15 seconds
+   - Idle: last seen within 1 minute
+   - Offline: anything older
 ============================================================ */
+const ONLINE_THRESHOLD_MS = 15 * 1000;   // 15 sec
+const IDLE_THRESHOLD_MS   = 60 * 1000;   // 1 min
+
 const getVehicleStatus = (lastSeen) => {
   if (!lastSeen) return 'offline';
 
   const diffMs = Date.now() - new Date(lastSeen).getTime();
-  const diffMin = diffMs / 60000;
 
-  if (diffMin <= 2) return 'online';
-  if (diffMin <= 10) return 'idle';
+  if (diffMs <= ONLINE_THRESHOLD_MS) return 'online';
+  if (diffMs <= IDLE_THRESHOLD_MS) return 'idle';
   return 'offline';
 };
 

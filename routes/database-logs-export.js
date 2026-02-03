@@ -21,32 +21,20 @@ async function buildTimeFilter(req, vehicleId) {
       case 'today':
         timeClause = `recorded_at >= ${nowIST}::date AND recorded_at < ${nowIST}::date + interval '1 day'`;
         break;
-      case 'week':
-        timeClause = `recorded_at >= ${nowIST}::date - interval '6 days'`;
-        break;
-      case 'month':
-        timeClause = `recorded_at >= ${nowIST}::date - interval '29 days'`;
-        break;
-      case 'all':
-        timeClause = 'TRUE';
-        break;
       default:
-        throw new Error('Invalid period');
+        throw new Error('Invalid period. Use "today" only.');
     }
   } else if (start && end) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
+      throw new Error('Invalid date format. Use YYYY-MM-DD');
+    }
     params.push(start, end);
     timeClause = `
       recorded_at >= timezone('Asia/Kolkata', $2::date)
       AND recorded_at < timezone('Asia/Kolkata', $3::date + interval '1 day')
     `;
-  } else if (date) {
-    params.push(date);
-    timeClause = `
-      recorded_at >= timezone('Asia/Kolkata', $2::date)
-      AND recorded_at < timezone('Asia/Kolkata', $2::date + interval '1 day')
-    `;
   } else {
-    throw new Error('Missing time range');
+    throw new Error('Missing time range. Provide "period=today" or "start" and "end" dates.');
   }
 
   return { timeClause, params };
@@ -81,7 +69,7 @@ router.get(
     }
 
     if (!['cells', 'temps'].includes(type)) {
-      return res.status(400).json({ error: 'Invalid export type' });
+      return res.status(400).json({ error: 'Invalid export type. Use "cells" or "temps".' });
     }
 
     try {
@@ -98,7 +86,8 @@ router.get(
       );
 
       if (!ownership.rows.length) {
-        return res.status(403).json({ error: 'Forbidden' });
+        logger.warn(`Access denied: user ${req.user.email || 'unknown'} tried ${type} export for vehicle ${id}`);
+        return res.status(403).json({ error: 'Access denied' });
       }
 
       const { timeClause, params } = await buildTimeFilter(req, id);
@@ -120,7 +109,7 @@ router.get(
 
     } catch (err) {
       logger.error(`Count error (vehicle ${id}, type ${type}): ${err.message}`);
-      return res.status(500).json({ error: 'Failed to get count' });
+      return res.status(500).json({ error: err.message || 'Failed to get count' });
     }
   }
 );
@@ -157,7 +146,8 @@ router.get(
       );
 
       if (!ownership.rows.length) {
-        return res.status(403).json({ error: 'Forbidden' });
+        logger.warn(`Cell export access denied: user ${req.user.email || 'unknown'} for vehicle ${id}`);
+        return res.status(403).json({ error: 'Access denied' });
       }
 
       const { timeClause, params } = await buildTimeFilter(req, id);
@@ -177,6 +167,7 @@ router.get(
       const totalRows = parseInt(countResult.rows[0].total, 10);
 
       if (totalRows === 0) {
+        logger.info(`No cell voltage data for vehicle ${id}`);
         return res.status(200).send('No data available');
       }
 
@@ -203,12 +194,12 @@ router.get(
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="vehicle_${id}_cell_voltages.csv"`
+        `attachment; filename="vehicle_${id}_cell_voltages_${Date.now()}.csv"`
       );
       res.setHeader('Transfer-Encoding', 'chunked');
       res.setHeader('X-Total-Rows', totalRows.toString());
 
-      // UTF-8 BOM
+      // UTF-8 BOM for Excel compatibility
       res.write('\uFEFF');
 
       // First pass: determine max structure
@@ -282,7 +273,7 @@ router.get(
         res.write(csvChunk);
         rowCount += rows.length;
 
-        // Log progress every 10 chunks
+        // Log progress every 10 chunks (10k rows)
         if (chunkCount % 10 === 0) {
           const percentComplete = ((rowCount / totalRows) * 100).toFixed(1);
           logger.info(`Cell export progress: ${rowCount}/${totalRows} rows (${percentComplete}%) for vehicle ${id}`);
@@ -351,7 +342,8 @@ router.get(
       );
 
       if (!ownership.rows.length) {
-        return res.status(403).json({ error: 'Forbidden' });
+        logger.warn(`Temperature export access denied: user ${req.user.email || 'unknown'} for vehicle ${id}`);
+        return res.status(403).json({ error: 'Access denied' });
       }
 
       const { timeClause, params } = await buildTimeFilter(req, id);
@@ -371,6 +363,7 @@ router.get(
       const totalRows = parseInt(countResult.rows[0].total, 10);
 
       if (totalRows === 0) {
+        logger.info(`No temperature data for vehicle ${id}`);
         return res.status(200).send('No data available');
       }
 
@@ -397,12 +390,12 @@ router.get(
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="vehicle_${id}_temperature_sensors.csv"`
+        `attachment; filename="vehicle_${id}_temperature_sensors_${Date.now()}.csv"`
       );
       res.setHeader('Transfer-Encoding', 'chunked');
       res.setHeader('X-Total-Rows', totalRows.toString());
 
-      // UTF-8 BOM
+      // UTF-8 BOM for Excel compatibility
       res.write('\uFEFF');
 
       // First pass: determine max structure
@@ -476,7 +469,7 @@ router.get(
         res.write(csvChunk);
         rowCount += rows.length;
 
-        // Log progress every 10 chunks
+        // Log progress every 10 chunks (10k rows)
         if (chunkCount % 10 === 0) {
           const percentComplete = ((rowCount / totalRows) * 100).toFixed(1);
           logger.info(`Temp export progress: ${rowCount}/${totalRows} rows (${percentComplete}%) for vehicle ${id}`);
