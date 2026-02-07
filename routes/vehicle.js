@@ -1,4 +1,4 @@
-// routes/vehicle.js - OPTIMIZED VERSION
+// routes/vehicle.js - OPTIMIZED & FIXED VERSION with improved /analytics
 const express = require('express');
 const db = require('../config/postgres');
 const authenticateToken = require('../middleware/auth');
@@ -18,7 +18,6 @@ const router = express.Router();
 
 /* ============================================================
    GET /api/vehicles — List accessible vehicles
-   → Only needed columns, customer isolation in one query
 ============================================================ */
 router.get(
   '/',
@@ -61,7 +60,6 @@ router.get(
 
 /* ============================================================
    GET /api/vehicles/:id — Vehicle summary + latest ODO/kWh
-   → Single query with CTEs
 ============================================================ */
 router.get(
   '/:id',
@@ -161,12 +159,10 @@ router.get(
       cleanupLiveCache();
       let entry = liveCache.get(cacheKey);
 
-      // Fast path: valid cache
       if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
         return res.json(entry.data);
       }
 
-      // Ownership check (fast EXISTS)
       const ownership = await db.query(
         `
         SELECT EXISTS(
@@ -184,26 +180,23 @@ router.get(
         return res.json({});
       }
 
-      // Re-check cache after ownership (race condition safety)
       entry = liveCache.get(cacheKey);
       if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
         return res.json(entry.data);
       }
 
-      // Wait for in-flight request if exists
       if (entry?.inflight) {
         try {
           const data = await Promise.race([
             entry.inflight,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Inflight timeout')), 5000)),
           ]);
           return res.json(data);
         } catch {
-          // timeout → fall through to fresh fetch
+          // timeout → fall through
         }
       }
 
-      // Start new fetch
       const inflightPromise = (async () => {
         try {
           const result = await db.query(
@@ -240,6 +233,145 @@ router.get(
 );
 
 /* ============================================================
+   GET /api/vehicles/:id/analytics
+   - mode=today
+   - OR from=YYYY-MM-DD & to=YYYY-MM-DD
+   - Timezone-safe handling (local midnight & end-of-day)
+============================================================ */
+router.get(
+  '/:id/analytics',
+  authenticateToken,
+  generalLimiter,
+  checkPermission('vehicles', 'read'),
+  async (req, res) => {
+    const { id } = req.params;
+    const { mode, from, to } = req.query;
+    const isCustomer = req.user.role === 'customer';
+
+    try {
+      // 1. Ownership check
+      const ownership = await db.query(
+        `
+        SELECT EXISTS(
+          SELECT 1
+          FROM vehicle_master vm
+          JOIN customer_master cm ON vm.customer_id = cm.customer_id
+          WHERE vm.vehicle_master_id = $1
+            AND ($2::int IS NULL OR cm.user_id = $2)
+        ) AS allowed
+        `,
+        [id, isCustomer ? req.user.user_id : null]
+      );
+
+      if (!ownership.rows[0]?.allowed) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      // 2. Resolve time range (timezone-safe: local time)
+      let startTime;
+      let endTime = new Date();
+
+      if (mode === 'today') {
+        startTime = new Date();
+        startTime.setHours(0, 0, 0, 0);
+      } else if (from && to) {
+        startTime = new Date(from);
+        startTime.setHours(0, 0, 0, 0);
+
+        endTime = new Date(to);
+        endTime.setHours(23, 59, 59, 999);
+      } else {
+        return res.status(400).json({
+          error: 'Invalid request. Use mode=today OR from=YYYY-MM-DD&to=YYYY-MM-DD',
+        });
+      }
+
+      if (isNaN(startTime.getTime()) || isNaN(endTime.getTime())) {
+        return res.status(400).json({ error: 'Invalid date format (use YYYY-MM-DD)' });
+      }
+
+      // Optional: ensure start <= end
+      if (startTime > endTime) {
+        return res.status(400).json({ error: 'Start date cannot be after end date' });
+      }
+
+      // 3. Fetch FIRST record in range
+      const firstRes = await db.query(
+        `
+        SELECT total_running_hrs, total_kwh_consumed
+        FROM live_values
+        WHERE vehicle_master_id = $1
+          AND recorded_at >= $2
+        ORDER BY recorded_at ASC
+        LIMIT 1
+        `,
+        [id, startTime]
+      );
+
+      // 4. Fetch LAST record in range
+      const lastRes = await db.query(
+        `
+        SELECT total_running_hrs, total_kwh_consumed
+        FROM live_values
+        WHERE vehicle_master_id = $1
+          AND recorded_at <= $2
+        ORDER BY recorded_at DESC
+        LIMIT 1
+        `,
+        [id, endTime]
+      );
+
+      if (!firstRes.rows.length || !lastRes.rows.length) {
+        return res.json({
+          vehicle_master_id: Number(id),
+          mode: mode === 'today' ? 'today' : 'custom',
+          from: startTime.toISOString(),
+          to: endTime.toISOString(),
+          running_hours: 0,
+          kwh_consumed: 0,
+          avg_kwh: null,
+        });
+      }
+
+      // 5. Compute deltas
+      const first = firstRes.rows[0];
+      const last = lastRes.rows[0];
+
+      const intervalToHours = (interval) => {
+        if (!interval) return 0;
+        const { days = 0, hours = 0, minutes = 0, seconds = 0 } = interval;
+        return days * 24 + hours + minutes / 60 + seconds / 3600;
+      };
+
+      const firstHours = intervalToHours(first.total_running_hrs);
+      const lastHours = intervalToHours(last.total_running_hrs);
+
+      const runningHours = Math.max(0, lastHours - firstHours);
+      const kwhConsumed =
+        last.total_kwh_consumed !== null && first.total_kwh_consumed !== null
+          ? Math.max(0, Number(last.total_kwh_consumed) - Number(first.total_kwh_consumed))
+          : 0;
+
+      const avgKwh = runningHours > 0 ? Number((kwhConsumed / runningHours).toFixed(2)) : null;
+
+      // 6. Response
+      res.json({
+        vehicle_master_id: Number(id),
+        mode: mode === 'today' ? 'today' : 'custom',
+        from: startTime.toISOString(),
+        to: endTime.toISOString(),
+        running_hours: Number(runningHours.toFixed(2)),
+        kwh_consumed: Number(kwhConsumed.toFixed(2)),
+        avg_kwh: avgKwh,
+      });
+    } catch (err) {
+      logger.error(`GET /vehicles/${id}/analytics error: ${err.message}`);
+      res.status(500).json({ error: 'Server error' });
+    }
+  }
+);
+
+/* ============================================================
    GET /api/vehicles/:id/stream — SSE live stream
 ============================================================ */
 router.get(
@@ -252,7 +384,6 @@ router.get(
     const user = req.user;
     const isCustomer = user.role === 'customer';
 
-    // Fast ownership check
     try {
       const ownership = await db.query(
         `
@@ -279,7 +410,7 @@ router.get(
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no', // Important for nginx/proxy
+      'X-Accel-Buffering': 'no',
     });
     res.flushHeaders();
 
@@ -287,11 +418,12 @@ router.get(
 
     const cacheKey = `vehicle_live:${id}`;
 
-    // Send cached value immediately if available
     cleanupLiveCache();
-    const cached = liveCache.get(cacheKey);
-    if (cached?.data) {
-      res.write(`data: ${JSON.stringify(cached.data)}\n\n`);
+    let entry = liveCache.get(cacheKey);
+    if (entry?.data) {
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify(entry.data)}\n\n`);
+      }
     }
 
     let missedUpdates = 0;
@@ -304,11 +436,13 @@ router.get(
 
       try {
         cleanupLiveCache();
-        const entry = liveCache.get(cacheKey);
+        entry = liveCache.get(cacheKey);
         const now = Date.now();
 
         if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
-          res.write(`data: ${JSON.stringify(entry.data)}\n\n`);
+          if (!res.writableEnded) {
+            res.write(`data: ${JSON.stringify(entry.data)}\n\n`);
+          }
           missedUpdates = 0;
           return;
         }
@@ -338,31 +472,37 @@ router.get(
 
           liveCache.set(cacheKey, { ts: now, inflight: inflightPromise });
 
-          const data = await inflightPromise;
+          const data = await Promise.race([
+            inflightPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Fetch timeout')), 5000)),
+          ]);
+
           liveCache.set(cacheKey, { ts: Date.now(), data });
 
           if (!res.writableEnded) {
             res.write(`data: ${JSON.stringify(data)}\n\n`);
-            missedUpdates = 0;
           }
+          missedUpdates = 0;
           return;
         }
 
         try {
           const data = await Promise.race([
             entry.inflight,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 3000)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Inflight timeout')), 3000)),
           ]);
 
           if (!res.writableEnded) {
             res.write(`data: ${JSON.stringify(data)}\n\n`);
-            missedUpdates = 0;
           }
-        } catch {
+          missedUpdates = 0;
+        } catch (err) {
           missedUpdates++;
           if (missedUpdates > 5) {
-            logger.warn(`Too many missed updates → closing SSE for vehicle ${id}`);
-            res.end();
+            logger.warn(`Too many missed updates (${missedUpdates}) → closing SSE for vehicle ${id}`);
+            if (!res.writableEnded) res.end();
+            clearInterval(interval);
+            return;
           }
         }
       } catch (err) {
@@ -370,17 +510,16 @@ router.get(
       }
     }, 1000);
 
-    // Heartbeat to detect dead connections faster
     const heartbeat = setInterval(() => {
-      if (!res.writableEnded) {
-        try {
-          res.write(':\n\n');
-        } catch {
-          clearInterval(heartbeat);
-          clearInterval(interval);
-        }
-      } else {
+      if (res.writableEnded) {
         clearInterval(heartbeat);
+        return;
+      }
+      try {
+        res.write(':\n\n');
+      } catch {
+        clearInterval(heartbeat);
+        clearInterval(interval);
       }
     }, 15000);
 

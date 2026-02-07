@@ -60,12 +60,14 @@ router.get(
           max_op_torque_nm,
           max_op_current_a,
           max_motor_temp_c,
+          max_motor_speed_rpm,              -- ✅ NEW
 
           /* ===== LAST TRIP PEAKS ===== */
           max_op_power_last_trip,
           max_op_torque_last_trip,
           max_op_current_last_trip,
-          max_motor_temp_last_trip
+          max_motor_temp_last_trip,
+          max_motor_speed_last_trip_rpm     -- ✅ NEW
 
         FROM motor_analytics_daily
         WHERE ${whereClause}

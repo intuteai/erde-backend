@@ -27,6 +27,7 @@ const getVehicleStatus = (lastSeen) => {
 
 /* ============================================================
    1. GET /api/vehicle-master/admin-summary
+   ── Now uses vehicle_latest_snapshot (fast)
 ============================================================ */
 router.get(
   '/admin-summary',
@@ -42,40 +43,23 @@ router.get(
           vt.make AS vehicle_make,
           vt.model AS vehicle_model,
           vt.capacity_tonne AS capacity,
-          lv.recorded_at AS last_seen,
+          vls.last_seen,
 
           CASE 
-            WHEN lv.total_running_hrs IS NOT NULL 
-            THEN ROUND(EXTRACT(EPOCH FROM lv.total_running_hrs) / 3600.0, 2)
+            WHEN vls.total_running_hrs IS NOT NULL 
+            THEN ROUND(EXTRACT(EPOCH FROM vls.total_running_hrs) / 3600.0, 2)
             ELSE NULL 
           END AS total_hours,
 
-          ROUND(lv.total_kwh_consumed, 2) AS total_kwh,
+          ROUND(vls.total_kwh_consumed, 2) AS total_kwh,
 
-          CASE
-            WHEN lv.total_running_hrs IS NOT NULL
-             AND EXTRACT(EPOCH FROM lv.total_running_hrs) >= 3600
-            THEN ROUND(
-              lv.total_kwh_consumed /
-              (EXTRACT(EPOCH FROM lv.total_running_hrs) / 3600),
-              2
-            )
-            ELSE NULL
-          END AS avg_kwh
+          ROUND(vls.avg_kwh, 2) AS avg_kwh
 
         FROM vehicle_master vm
         JOIN customer_master cm ON vm.customer_id = cm.customer_id
         JOIN vehicle_type_master vt ON vm.vtype_id = vt.vtype_id
-        LEFT JOIN LATERAL (
-          SELECT
-            recorded_at,
-            total_running_hrs,
-            total_kwh_consumed
-          FROM live_values
-          WHERE vehicle_master_id = vm.vehicle_master_id
-          ORDER BY recorded_at DESC
-          LIMIT 1
-        ) lv ON true
+        LEFT JOIN vehicle_latest_snapshot vls
+          ON vls.vehicle_master_id = vm.vehicle_master_id
         ORDER BY vm.vehicle_master_id ASC
       `);
 
@@ -102,6 +86,7 @@ router.get(
 
 /* ============================================================
    2. GET /api/vehicle-master/my
+   ── Now uses vehicle_latest_snapshot (fast)
 ============================================================ */
 router.get(
   '/my',
@@ -133,39 +118,22 @@ router.get(
           vm.vcu_make_model,
           vm.hmi_make_model,
 
-          lv.recorded_at AS last_seen,
+          vls.last_seen,
 
           CASE 
-            WHEN lv.total_running_hrs IS NOT NULL 
-            THEN ROUND(EXTRACT(EPOCH FROM lv.total_running_hrs) / 3600.0, 2)
+            WHEN vls.total_running_hrs IS NOT NULL 
+            THEN ROUND(EXTRACT(EPOCH FROM vls.total_running_hrs) / 3600.0, 2)
             ELSE NULL 
           END AS total_hours,
 
-          ROUND(lv.total_kwh_consumed, 2) AS total_kwh,
+          ROUND(vls.total_kwh_consumed, 2) AS total_kwh,
 
-          CASE
-            WHEN lv.total_running_hrs IS NOT NULL
-             AND EXTRACT(EPOCH FROM lv.total_running_hrs) >= 3600
-            THEN ROUND(
-              lv.total_kwh_consumed /
-              (EXTRACT(EPOCH FROM lv.total_running_hrs) / 3600),
-              2
-            )
-            ELSE NULL
-          END AS avg_kwh
+          ROUND(vls.avg_kwh, 2) AS avg_kwh
 
         FROM vehicle_master vm
         JOIN vehicle_type_master vt ON vm.vtype_id = vt.vtype_id
-        LEFT JOIN LATERAL (
-          SELECT
-            recorded_at,
-            total_running_hrs,
-            total_kwh_consumed
-          FROM live_values
-          WHERE vehicle_master_id = vm.vehicle_master_id
-          ORDER BY recorded_at DESC
-          LIMIT 1
-        ) lv ON true
+        LEFT JOIN vehicle_latest_snapshot vls
+          ON vls.vehicle_master_id = vm.vehicle_master_id
         WHERE vm.customer_id = $1
         ORDER BY vm.vehicle_master_id ASC
       `, [customerId]);
@@ -195,7 +163,7 @@ router.get(
 );
 
 /* ============================================================
-   3. GET /api/vehicle-master (Admin full detailed list)
+   3. GET /api/vehicle-master (Admin full detailed list) — UNCHANGED
 ============================================================ */
 router.get(
   '/',
@@ -265,7 +233,7 @@ router.get(
 );
 
 /* ============================================================
-   4. POST /api/vehicle-master
+   4. POST /api/vehicle-master — UNCHANGED
 ============================================================ */
 router.post(
   '/',
@@ -359,7 +327,7 @@ router.post(
 );
 
 /* ============================================================
-   5. PUT /api/vehicle-master/:id
+   5. PUT /api/vehicle-master/:id — UNCHANGED
 ============================================================ */
 router.put(
   '/:id',
@@ -427,7 +395,7 @@ router.put(
 );
 
 /* ============================================================
-   6. DELETE /api/vehicle-master/:id
+   6. DELETE /api/vehicle-master/:id — UNCHANGED
 ============================================================ */
 router.delete(
   '/:id',
