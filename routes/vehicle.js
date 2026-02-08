@@ -236,7 +236,7 @@ router.get(
    GET /api/vehicles/:id/analytics
    - mode=today
    - OR from=YYYY-MM-DD & to=YYYY-MM-DD
-   - Timezone-safe handling (local midnight & end-of-day)
+   - Proper IST timezone handling
 ============================================================ */
 router.get(
   '/:id/analytics',
@@ -267,19 +267,23 @@ router.get(
         return res.status(403).json({ error: 'Access denied' });
       }
 
-      // 2. Resolve time range (timezone-safe: local time)
+      // 2. Resolve time range (IST-safe, production-safe)
+      const toISTStart = (d) => new Date(`${d}T00:00:00+05:30`);
+      const toISTEnd = (d) => new Date(`${d}T23:59:59.999+05:30`);
+
       let startTime;
-      let endTime = new Date();
+      let endTime;
 
       if (mode === 'today') {
-        startTime = new Date();
-        startTime.setHours(0, 0, 0, 0);
-      } else if (from && to) {
-        startTime = new Date(from);
-        startTime.setHours(0, 0, 0, 0);
+        const todayIST = new Date().toLocaleDateString('en-CA', {
+          timeZone: 'Asia/Kolkata',
+        });
 
-        endTime = new Date(to);
-        endTime.setHours(23, 59, 59, 999);
+        startTime = toISTStart(todayIST);
+        endTime = new Date(); // now
+      } else if (from && to) {
+        startTime = toISTStart(from);
+        endTime = toISTEnd(to);
       } else {
         return res.status(400).json({
           error: 'Invalid request. Use mode=today OR from=YYYY-MM-DD&to=YYYY-MM-DD',
@@ -321,7 +325,7 @@ router.get(
         [id, endTime]
       );
 
-      if (!firstRes.rows.length || !lastRes.rows.length) {
+      if (!lastRes.rows.length) {
         return res.json({
           vehicle_master_id: Number(id),
           mode: mode === 'today' ? 'today' : 'custom',
@@ -333,10 +337,11 @@ router.get(
         });
       }
 
-      // 5. Compute deltas
-      const first = firstRes.rows[0];
+      // Allow fallback when first record is missing
+      const first = firstRes.rows[0] || lastRes.rows[0];
       const last = lastRes.rows[0];
 
+      // 5. Compute deltas
       const intervalToHours = (interval) => {
         if (!interval) return 0;
         const { days = 0, hours = 0, minutes = 0, seconds = 0 } = interval;
