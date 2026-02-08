@@ -6,7 +6,6 @@ const checkPermission = require('../middleware/checkPermission');
 const { generalLimiter, liveRateLimiter } = require('../middleware/rateLimiter');
 const logger = require('../utils/logger');
 const { formatLiveData } = require('../utils/formatLiveData');
-
 // Shared cache from dedicated service
 const {
   liveCache,
@@ -27,7 +26,6 @@ router.get(
   async (req, res) => {
     try {
       const isCustomer = req.user.role === 'customer';
-
       const result = await db.query(
         `
         SELECT
@@ -49,7 +47,6 @@ router.get(
         `,
         [isCustomer ? req.user.user_id : null]
       );
-
       res.json(result.rows);
     } catch (err) {
       logger.error(`GET /vehicles error: ${err.message}`);
@@ -69,7 +66,6 @@ router.get(
   async (req, res) => {
     const { id } = req.params;
     const isCustomer = req.user.role === 'customer';
-
     try {
       const result = await db.query(
         `
@@ -88,7 +84,7 @@ router.get(
             AND ($2::int IS NULL OR cm.user_id = $2)
         ),
         latest_live AS (
-          SELECT 
+          SELECT
             total_running_hrs,
             total_kwh_consumed
           FROM live_values
@@ -96,7 +92,7 @@ router.get(
           ORDER BY recorded_at DESC
           LIMIT 1
         )
-        SELECT 
+        SELECT
           vi.*,
           ll.total_running_hrs,
           ll.total_kwh_consumed
@@ -209,9 +205,7 @@ router.get(
             `,
             [id]
           );
-
           if (!result.rows.length) return {};
-
           return formatLiveData(result.rows[0]);
         } catch (err) {
           logger.error(`Live fetch error for vehicle ${id}: ${err.message}`);
@@ -220,7 +214,6 @@ router.get(
       })();
 
       liveCache.set(cacheKey, { ts: now, inflight: inflightPromise });
-
       const data = await inflightPromise;
       liveCache.set(cacheKey, { ts: Date.now(), data });
 
@@ -236,7 +229,7 @@ router.get(
    GET /api/vehicles/:id/analytics
    - mode=today
    - OR from=YYYY-MM-DD & to=YYYY-MM-DD
-   - Proper IST timezone handling
+   - Proper IST timezone handling + fixed invalid records
 ============================================================ */
 router.get(
   '/:id/analytics',
@@ -267,7 +260,7 @@ router.get(
         return res.status(403).json({ error: 'Access denied' });
       }
 
-      // 2. Resolve time range (IST-safe, production-safe)
+      // 2. Resolve time range (IST-safe)
       const toISTStart = (d) => new Date(`${d}T00:00:00+05:30`);
       const toISTEnd = (d) => new Date(`${d}T23:59:59.999+05:30`);
 
@@ -278,7 +271,6 @@ router.get(
         const todayIST = new Date().toLocaleDateString('en-CA', {
           timeZone: 'Asia/Kolkata',
         });
-
         startTime = toISTStart(todayIST);
         endTime = new Date(); // now
       } else if (from && to) {
@@ -294,31 +286,34 @@ router.get(
         return res.status(400).json({ error: 'Invalid date format (use YYYY-MM-DD)' });
       }
 
-      // Optional: ensure start <= end
       if (startTime > endTime) {
         return res.status(400).json({ error: 'Start date cannot be after end date' });
       }
 
-      // 3. Fetch FIRST record in range
+      // 3. Fetch FIRST valid record in range
       const firstRes = await db.query(
         `
         SELECT total_running_hrs, total_kwh_consumed
         FROM live_values
         WHERE vehicle_master_id = $1
           AND recorded_at >= $2
+          AND total_running_hrs IS NOT NULL
+          AND total_kwh_consumed IS NOT NULL
         ORDER BY recorded_at ASC
         LIMIT 1
         `,
         [id, startTime]
       );
 
-      // 4. Fetch LAST record in range
+      // 4. Fetch LAST valid record in range
       const lastRes = await db.query(
         `
         SELECT total_running_hrs, total_kwh_consumed
         FROM live_values
         WHERE vehicle_master_id = $1
           AND recorded_at <= $2
+          AND total_running_hrs IS NOT NULL
+          AND total_kwh_consumed IS NOT NULL
         ORDER BY recorded_at DESC
         LIMIT 1
         `,
@@ -337,9 +332,9 @@ router.get(
         });
       }
 
-      // Allow fallback when first record is missing
-      const first = firstRes.rows[0] || lastRes.rows[0];
       const last = lastRes.rows[0];
+      // Fallback: if no valid first record → use last as baseline (delta = 0)
+      const first = firstRes.rows[0] || last;
 
       // 5. Compute deltas
       const intervalToHours = (interval) => {
@@ -351,7 +346,21 @@ router.get(
       const firstHours = intervalToHours(first.total_running_hrs);
       const lastHours = intervalToHours(last.total_running_hrs);
 
+      // Extra safety: both zero → treat as no activity
+      if (lastHours === 0 && firstHours === 0) {
+        return res.json({
+          vehicle_master_id: Number(id),
+          mode: mode === 'today' ? 'today' : 'custom',
+          from: startTime.toISOString(),
+          to: endTime.toISOString(),
+          running_hours: 0,
+          kwh_consumed: 0,
+          avg_kwh: null,
+        });
+      }
+
       const runningHours = Math.max(0, lastHours - firstHours);
+
       const kwhConsumed =
         last.total_kwh_consumed !== null && first.total_kwh_consumed !== null
           ? Math.max(0, Number(last.total_kwh_consumed) - Number(first.total_kwh_consumed))
@@ -417,13 +426,14 @@ router.get(
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
+
     res.flushHeaders();
 
     logger.info(`🟢 SSE connected → user=${user.email}, vehicle=${id}`);
 
     const cacheKey = `vehicle_live:${id}`;
-
     cleanupLiveCache();
+
     let entry = liveCache.get(cacheKey);
     if (entry?.data) {
       if (!res.writableEnded) {
@@ -465,9 +475,7 @@ router.get(
                 `,
                 [id]
               );
-
               if (!result.rows.length) return {};
-
               return formatLiveData(result.rows[0]);
             } catch (err) {
               logger.error(`SSE fetch error for vehicle ${id}: ${err.message}`);
