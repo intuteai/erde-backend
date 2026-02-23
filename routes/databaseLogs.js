@@ -131,6 +131,7 @@ router.get(
           dcdc_sec_ls_mosfet_temp_c,
           dcdc_sec_hs_mosfet_temp_c,
           dcdc_pri_c_mosfet_temp_c,
+          dcdc_max_temp_c,
           dcdc_input_voltage_v,
           dcdc_input_current_a,
           dcdc_output_voltage_v,
@@ -152,8 +153,10 @@ router.get(
           motor_status_word,
           motor_freq_raw,
           motor_total_wattage_w,
-          motor_dc_input_voltage_raw,
-          motor_ac_output_voltage_raw,
+          compressor_input_voltage_v,
+          compressor_input_current_a,
+          compressor_output_voltage_v,
+          compressor_output_current_a,
           ROUND(CAST((stack_voltage_v * ABS(battery_current_a)) / 1000.0 AS numeric), 3) AS output_power_kw
         FROM live_values
         WHERE vehicle_master_id = $1
@@ -422,8 +425,6 @@ router.get(
         { key: 'motor_status_word', label: 'Motor Status Word' },
         { key: 'motor_freq_raw', label: 'Motor Frequency Raw' },
         { key: 'motor_total_wattage_w', label: 'Motor Total Wattage (W)' },
-        { key: 'motor_dc_input_voltage_raw', label: 'Motor DC Input Voltage Raw' },
-        { key: 'motor_ac_output_voltage_raw', label: 'Motor AC Output Voltage Raw' },
         { key: 'btms_command_mode', label: 'BTMS Command Mode' },
         { key: 'btms_status_mode', label: 'BTMS Status Mode' },
         { key: 'btms_hv_request', label: 'BTMS HV Request' },
@@ -441,11 +442,16 @@ router.get(
         { key: 'dcdc_sec_ls_mosfet_temp_c', label: 'DCDC Sec LS MOSFET Temp (°C)' },
         { key: 'dcdc_sec_hs_mosfet_temp_c', label: 'DCDC Sec HS MOSFET Temp (°C)' },
         { key: 'dcdc_pri_c_mosfet_temp_c', label: 'DCDC Pri C MOSFET Temp (°C)' },
+        { key: 'dcdc_max_temp_c', label: 'DCDC Max Temp (°C)' },
         { key: 'dcdc_input_voltage_v', label: 'DCDC Input Voltage (V)' },
         { key: 'dcdc_input_current_a', label: 'DCDC Input Current (A)' },
         { key: 'dcdc_output_voltage_v', label: 'DCDC Output Voltage (V)' },
         { key: 'dcdc_output_current_a', label: 'DCDC Output Current (A)' },
         { key: 'dcdc_occurence_count', label: 'DCDC Overcurrent Count' },
+        { key: 'compressor_input_voltage_v', label: 'Compressor Input Voltage (V)' },
+        { key: 'compressor_input_current_a', label: 'Compressor Input Current (A)' },
+        { key: 'compressor_output_voltage_v', label: 'Compressor Output Voltage (V)' },
+        { key: 'compressor_output_current_a', label: 'Compressor Output Current (A)' },
         { key: 'total_running_hrs', label: 'Total Running Hours' },
         { key: 'last_trip_hrs', label: 'Last Trip Hours' },
         { key: 'total_kwh_consumed', label: 'Total kWh Consumed' },
@@ -486,16 +492,13 @@ router.get(
       logger.info(`Starting export for vehicle ${id}: ${totalRows} total rows`);
 
       // ---------------- STEP 1: DETECT EMPTY COLUMNS ACROSS ENTIRE DATASET ----------------
-      // Build COUNT queries for each column to check if it has any non-null values
       const columnCheckPromises = columnKeys.map(async (key) => {
-        // Skip timestamp - it's always populated
         if (key === 'recorded_at') {
           return { key, hasData: true };
         }
 
         let countQuery;
         if (key === 'output_power_kw') {
-          // For calculated column, check the source columns
           countQuery = `
             SELECT COUNT(*) as count
             FROM live_values
@@ -506,18 +509,15 @@ router.get(
             LIMIT 1
           `;
         } else if (key === 'total_running_hrs' || key === 'last_trip_hrs') {
-          // For interval columns formatted with to_char
-          const baseColumn = key; // these are actual columns in the table
           countQuery = `
             SELECT COUNT(*) as count
             FROM live_values
             WHERE vehicle_master_id = $1
               AND ${timeClause}
-              AND ${baseColumn} IS NOT NULL
+              AND ${key} IS NOT NULL
             LIMIT 1
           `;
         } else {
-          // For regular columns
           countQuery = `
             SELECT COUNT(*) as count
             FROM live_values
@@ -535,13 +535,11 @@ router.get(
 
       const columnCheckResults = await Promise.all(columnCheckPromises);
 
-      // Build map of which columns have data
       const columnHasData = {};
       columnCheckResults.forEach(({ key, hasData }) => {
         columnHasData[key] = hasData;
       });
 
-      // Filter out completely empty columns
       const activeColumnKeys = columnKeys.filter(key => columnHasData[key]);
       const activeColumnLabels = columnLabels.filter((_, idx) => columnHasData[columnKeys[idx]]);
 
@@ -564,7 +562,6 @@ router.get(
       res.setHeader('Transfer-Encoding', 'chunked');
       res.setHeader('X-Total-Rows', totalRows.toString());
 
-      // Write CSV header (only active columns)
       const csvHeader = activeColumnLabels.map(label => `"${label}"`).join(',') + '\n';
       res.write(csvHeader);
 
@@ -572,9 +569,8 @@ router.get(
       let chunkCount = 0;
       const CHUNK_SIZE = 5000;
 
-      // Use cursor for memory-efficient streaming
       const cursorName = `export_cursor_${Date.now()}`;
-      
+
       const fullQuery = `
         SELECT
           ${selectFields}
@@ -589,17 +585,15 @@ router.get(
 
       while (true) {
         const { rows } = await client.query(`FETCH ${CHUNK_SIZE} FROM ${cursorName}`);
-        
+
         if (rows.length === 0) break;
 
         chunkCount++;
-        
-        // Convert rows to CSV format (only active columns)
+
         const csvChunk = rows.map(row => {
           return activeColumnKeys.map(key => {
             let val = row[key];
-            
-            // Format timestamp
+
             if (key === 'recorded_at' && val) {
               val = val.toLocaleString('en-IN', {
                 timeZone: 'Asia/Kolkata',
@@ -612,20 +606,16 @@ router.get(
                 hour12: false,
               });
             }
-            
-            // Handle null/undefined
+
             if (val === null || val === undefined) return '';
-            
-            // Escape quotes in strings
+
             return `"${String(val).replace(/"/g, '""')}"`;
           }).join(',');
         }).join('\n') + '\n';
 
-        // Write chunk to response
         res.write(csvChunk);
         rowCount += rows.length;
 
-        // Log progress every 10 chunks (50k rows)
         if (chunkCount % 10 === 0) {
           const percentComplete = ((rowCount / totalRows) * 100).toFixed(1);
           logger.info(`Export progress: ${rowCount}/${totalRows} rows (${percentComplete}%) for vehicle ${id}`);
@@ -640,7 +630,7 @@ router.get(
 
     } catch (err) {
       logger.error(`Export error (vehicle ${id}): ${err.message}`);
-      
+
       if (client) {
         try {
           await client.query('ROLLBACK');
@@ -652,7 +642,6 @@ router.get(
       if (!res.headersSent) {
         return res.status(500).json({ error: 'Export failed' });
       } else {
-        // If headers already sent, just end the stream
         res.end();
       }
     } finally {
