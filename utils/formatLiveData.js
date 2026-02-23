@@ -49,7 +49,7 @@ function formatLiveData(row) {
 
   const r = row;
 
-  // Input arrays (nested structure – coming from JSONB or similar)
+  // Input arrays (nested structure – coming from JSONB)
   const cellModules = Array.isArray(r.cell_modules) ? r.cell_modules : [];
   const tempModules = Array.isArray(r.temp_modules) ? r.temp_modules : [];
 
@@ -132,7 +132,7 @@ function formatLiveData(row) {
     charging_current_a: toNumber(r.charger_current_demand_a),
     charger_voltage_demand_v: toNumber(r.charger_voltage_demand_v),
 
-    // Pack-level legacy min/max/avg (still kept as requested – "DO NOT TOUCH THESE")
+    // Pack-level legacy min/max/avg (BMS-reported — DO NOT TOUCH THESE)
     max_voltage_v: toNumber(r.max_voltage_v),
     min_voltage_v: toNumber(r.min_voltage_v),
     avg_voltage_v: toNumber(r.avg_voltage_v),
@@ -140,8 +140,7 @@ function formatLiveData(row) {
     min_temp_c: toNumber(r.min_temp_c),
     avg_temp_c: toNumber(r.avg_temp_c),
 
-    // ──── Core fields the current frontend uses ────
-    // FIXED HERE ↓↓↓
+    // Cell / temp module arrays + computed stats
     temp_modules: tempModules,
     cell_modules: cellModules,
 
@@ -150,6 +149,7 @@ function formatLiveData(row) {
     cell_pack_stats,
     cell_module_stats,
 
+    // Motor / MCU
     motor_torque_nm: toNumber(r.motor_torque_value),
     motor_torque_limit: toNumber(r.motor_torque_limit),
     motor_operation_mode: r.motor_operation_mode ?? null,
@@ -163,27 +163,31 @@ function formatLiveData(row) {
     mcu_temp_c: toNumber(r.mcu_temp_c),
     radiator_temp_c: toNumber(r.radiator_temp_c),
 
-    motor_status_word: toNumber(r.motor_status_word),
+    // motor_status_word is stored as varchar hex string in DB (e.g. "0x001A")
+    // passed through as-is — no conversion needed
+    motor_status_word: r.motor_status_word ?? null,
     motor_freq_raw: toNumber(r.motor_freq_raw),
     motor_total_wattage_w: toNumber(r.motor_total_wattage_w),
-    motor_dc_input_voltage_raw: toNumber(r.motor_dc_input_voltage_raw),
-    motor_ac_output_voltage_raw: toNumber(r.motor_ac_output_voltage_raw),
 
+    // ODO / Trip
     total_hours: intervalToHours(r.total_running_hrs),
     last_trip_hrs: intervalToHours(r.last_trip_hrs),
     total_kwh: toNumber(r.total_kwh_consumed),
     last_trip_kwh: toNumber(r.last_trip_kwh),
 
+    // DC-DC Converter
     dcdc_input_voltage_v: toNumber(r.dcdc_input_voltage_v),
     dcdc_input_current_a: toNumber(r.dcdc_input_current_a),
     dcdc_output_voltage_v: toNumber(r.dcdc_output_voltage_v),
     dcdc_output_current_a: toNumber(r.dcdc_output_current_a),
+    dcdc_max_temp_c: toNumber(r.dcdc_max_temp_c),
     dcdc_pri_a_mosfet_temp_c: toNumber(r.dcdc_pri_a_mosfet_temp_c),
     dcdc_pri_c_mosfet_temp_c: toNumber(r.dcdc_pri_c_mosfet_temp_c),
     dcdc_sec_ls_mosfet_temp_c: toNumber(r.dcdc_sec_ls_mosfet_temp_c),
     dcdc_sec_hs_mosfet_temp_c: toNumber(r.dcdc_sec_hs_mosfet_temp_c),
     dcdc_occurrence_count: toNumber(r.dcdc_occurence_count),
 
+    // BTMS
     btms_command_mode: toNumber(r.btms_command_mode),
     btms_hv_request: toNumber(r.btms_hv_request),
     btms_charge_status: toNumber(r.btms_charge_status),
@@ -198,6 +202,13 @@ function formatLiveData(row) {
     btms_outlet_temp_c: toNumber(r.btms_outlet_temp_c),
     btms_demand_power_kw: toNumber(r.btms_demand_power_kw),
 
+    // Air Compressor
+    compressor_input_voltage_v: toNumber(r.compressor_input_voltage_v),
+    compressor_input_current_a: toNumber(r.compressor_input_current_a),
+    compressor_output_voltage_v: toNumber(r.compressor_output_voltage_v),
+    compressor_output_current_a: toNumber(r.compressor_output_current_a),
+
+    // Computed output power
     output_power_kw: null,
   };
 
