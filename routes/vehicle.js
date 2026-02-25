@@ -226,6 +226,91 @@ router.get(
 );
 
 /* ============================================================
+   GET /api/vehicles/:id/timeseries?minutes=5
+   Returns recent rows for charting — only the 5 fields needed
+   by LiveCharts plus recorded_at for the time axis.
+============================================================ */
+router.get(
+  '/:id/timeseries',
+  authenticateToken,
+  generalLimiter,
+  checkPermission('live_view', 'read'),
+  async (req, res) => {
+    const { id } = req.params;
+    const isCustomer = req.user.role === 'customer';
+
+    // Clamp minutes between 1 and 60 to prevent abuse
+    const rawMinutes = parseInt(req.query.minutes ?? '5', 10);
+    const minutes = Number.isFinite(rawMinutes)
+      ? Math.min(Math.max(rawMinutes, 1), 60)
+      : 5;
+
+    try {
+      // Ownership check
+      const ownership = await db.query(
+        `
+        SELECT EXISTS(
+          SELECT 1
+          FROM vehicle_master vm
+          JOIN customer_master cm ON vm.customer_id = cm.customer_id
+          WHERE vm.vehicle_master_id = $1
+            AND ($2::int IS NULL OR cm.user_id = $2)
+        ) AS allowed
+        `,
+        [id, isCustomer ? req.user.user_id : null]
+      );
+
+      if (!ownership.rows[0]?.allowed) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      // DB clock may differ from Node clock (timezone skew on cloud DBs).
+      // Strategy: anchor to MAX recorded_at in table, walk back `minutes` from there.
+      // This is immune to any DB/Node clock mismatch.
+      const anchorRes = await db.query(
+        `SELECT MAX(recorded_at) AS latest FROM live_values WHERE vehicle_master_id = $1`,
+        [id]
+      );
+
+      const latest = anchorRes.rows[0]?.latest;
+      if (!latest) {
+        logger.info(`Timeseries vehicle=${id}: no data in table`);
+        return res.json([]);
+      }
+
+      const result = await db.query(
+        `
+        SELECT
+          recorded_at,
+          CASE
+            WHEN stack_voltage_v IS NOT NULL AND battery_current_a IS NOT NULL
+            THEN ROUND((stack_voltage_v * ABS(battery_current_a)) / 1000.0, 4)
+            ELSE NULL
+          END                       AS output_power_kw,
+          motor_speed_rpm,
+          motor_torque_value        AS motor_torque_nm,
+          battery_current_a         AS dc_current_a,
+          motor_ac_current_a        AS ac_current_a
+        FROM live_values
+        WHERE vehicle_master_id = $1
+          AND recorded_at >= $2::timestamptz - (INTERVAL '1 minute' * $3)
+          AND recorded_at <= $2::timestamptz
+        ORDER BY recorded_at ASC
+        LIMIT 300
+        `,
+        [id, latest, minutes]
+      );
+
+      logger.info(`Timeseries vehicle=${id}: ${result.rows.length} rows anchored to ${latest}`);
+      res.json(result.rows);
+    } catch (err) {
+      logger.error(`GET /vehicles/${id}/timeseries error: ${err.message}`);
+      res.status(500).json({ error: 'Server error' });
+    }
+  }
+);
+
+/* ============================================================
    GET /api/vehicles/:id/analytics
    - mode=today
    - OR from=YYYY-MM-DD & to=YYYY-MM-DD
@@ -272,7 +357,7 @@ router.get(
           timeZone: 'Asia/Kolkata',
         });
         startTime = toISTStart(todayIST);
-        endTime = new Date(); // now
+        endTime = new Date();
       } else if (from && to) {
         startTime = toISTStart(from);
         endTime = toISTEnd(to);
@@ -333,7 +418,6 @@ router.get(
       }
 
       const last = lastRes.rows[0];
-      // Fallback: if no valid first record → use last as baseline (delta = 0)
       const first = firstRes.rows[0] || last;
 
       // 5. Compute deltas
@@ -346,7 +430,6 @@ router.get(
       const firstHours = intervalToHours(first.total_running_hrs);
       const lastHours = intervalToHours(last.total_running_hrs);
 
-      // Extra safety: both zero → treat as no activity
       if (lastHours === 0 && firstHours === 0) {
         return res.json({
           vehicle_master_id: Number(id),
@@ -360,7 +443,6 @@ router.get(
       }
 
       const runningHours = Math.max(0, lastHours - firstHours);
-
       const kwhConsumed =
         last.total_kwh_consumed !== null && first.total_kwh_consumed !== null
           ? Math.max(0, Number(last.total_kwh_consumed) - Number(first.total_kwh_consumed))
