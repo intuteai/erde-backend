@@ -227,7 +227,7 @@ router.get(
 
 /* ============================================================
    GET /api/vehicles/:id/timeseries?minutes=5
-   Returns recent rows for charting — only the 5 fields needed
+   Returns recent rows for charting — only the fields needed
    by LiveCharts plus recorded_at for the time axis.
 ============================================================ */
 router.get(
@@ -290,7 +290,8 @@ router.get(
           motor_speed_rpm,
           motor_torque_value        AS motor_torque_nm,
           battery_current_a         AS dc_current_a,
-          motor_ac_current_a        AS ac_current_a
+          motor_ac_current_a        AS ac_current_a,
+          motor_ac_voltage_v        AS ac_voltage_v
         FROM live_values
         WHERE vehicle_master_id = $1
           AND recorded_at >= $2::timestamptz - (INTERVAL '1 minute' * $3)
