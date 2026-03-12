@@ -115,6 +115,179 @@ router.get(
 );
 
 /* ============================================================
+   GET /api/vehicles/analytics/batch
+   ?mode=today  OR  ?from=YYYY-MM-DD&to=YYYY-MM-DD
+
+   Returns analytics for ALL accessible vehicles in ONE query.
+   Replaces N individual /analytics calls from the dashboard.
+
+   MUST be defined before /:id routes so Express does not
+   treat the literal string "analytics" as a vehicle :id.
+============================================================ */
+router.get(
+  '/analytics/batch',
+  authenticateToken,
+  generalLimiter,
+  checkPermission('vehicles', 'read'),
+  async (req, res) => {
+    const { mode, from, to } = req.query;
+    const isCustomer = req.user.role === 'customer';
+
+    // 1. Resolve IST-safe time range
+    const toISTStart = (d) => new Date(`${d}T00:00:00+05:30`);
+    const toISTEnd   = (d) => new Date(`${d}T23:59:59.999+05:30`);
+
+    let startTime, endTime;
+
+    if (mode === 'today') {
+      const todayIST = new Date().toLocaleDateString('en-CA', {
+        timeZone: 'Asia/Kolkata',
+      });
+      startTime = toISTStart(todayIST);
+      endTime   = new Date();
+    } else if (from && to) {
+      startTime = toISTStart(from);
+      endTime   = toISTEnd(to);
+    } else {
+      return res.status(400).json({
+        error: 'Use mode=today OR from=YYYY-MM-DD&to=YYYY-MM-DD',
+      });
+    }
+
+    if (isNaN(startTime.getTime()) || isNaN(endTime.getTime())) {
+      return res.status(400).json({ error: 'Invalid date format (use YYYY-MM-DD)' });
+    }
+    if (startTime > endTime) {
+      return res.status(400).json({ error: 'Start date cannot be after end date' });
+    }
+
+    try {
+      // 2. Get all vehicle IDs this user can access
+      const vehicleRes = await db.query(
+        `
+        SELECT vm.vehicle_master_id
+        FROM vehicle_master vm
+        JOIN customer_master cm ON vm.customer_id = cm.customer_id
+        WHERE ($1::int IS NULL OR cm.user_id = $1)
+        `,
+        [isCustomer ? req.user.user_id : null]
+      );
+
+      if (!vehicleRes.rows.length) return res.json({});
+
+      const vehicleIds = vehicleRes.rows.map(r => r.vehicle_master_id);
+
+      // 3. LATERAL join — one index seek per vehicle using idx_live.
+      //
+      //    baseline_row: the last record BEFORE the window opens.
+      //      This is the odometer reading at the start of the period.
+      //      Using the record just before (not just after) the window
+      //      correctly handles the case where a vehicle was already
+      //      running before the window start (e.g. today at midnight).
+      //
+      //    last_row: the last record inside the window.
+      //      Delta = last_row - baseline_row gives the period's usage.
+      //
+      //    Why not first record inside the window?
+      //      If a vehicle starts the day with total_running_hrs = 10.5
+      //      and the first telemetry of the day arrives at 08:00 with
+      //      total_running_hrs = 10.5, the delta would be 0 — correct.
+      //      But if no record lands exactly at window start, the first
+      //      record inside the window might already have accumulated time,
+      //      causing the delta to be understated. The pre-window baseline
+      //      is always the most accurate reference point.
+      const rangeRes = await db.query(
+        `
+        SELECT
+          v.vehicle_master_id,
+          baseline_row.total_running_hrs  AS first_running_hrs,
+          baseline_row.total_kwh_consumed AS first_kwh,
+          last_row.total_running_hrs      AS last_running_hrs,
+          last_row.total_kwh_consumed     AS last_kwh
+        FROM unnest($1::int[]) AS v(vehicle_master_id)
+
+        -- Baseline: last record strictly BEFORE the window opens
+        LEFT JOIN LATERAL (
+          SELECT total_running_hrs, total_kwh_consumed
+          FROM live_values
+          WHERE vehicle_master_id = v.vehicle_master_id
+            AND recorded_at < $2
+            AND total_running_hrs  IS NOT NULL
+            AND total_kwh_consumed IS NOT NULL
+          ORDER BY recorded_at DESC
+          LIMIT 1
+        ) baseline_row ON true
+
+        -- Last record inside the window
+        LEFT JOIN LATERAL (
+          SELECT total_running_hrs, total_kwh_consumed
+          FROM live_values
+          WHERE vehicle_master_id = v.vehicle_master_id
+            AND recorded_at >= $2
+            AND recorded_at <= $3
+            AND total_running_hrs  IS NOT NULL
+            AND total_kwh_consumed IS NOT NULL
+          ORDER BY recorded_at DESC
+          LIMIT 1
+        ) last_row ON true
+        `,
+        [vehicleIds, startTime, endTime]
+      );
+
+      // 4. Compute deltas per vehicle
+      const intervalToHours = (interval) => {
+        if (!interval) return 0;
+        const { days = 0, hours = 0, minutes = 0, seconds = 0 } = interval;
+        return days * 24 + hours + minutes / 60 + seconds / 3600;
+      };
+
+      const map = {};
+
+      for (const row of rangeRes.rows) {
+        const firstHours   = intervalToHours(row.first_running_hrs);
+        const lastHours    = intervalToHours(row.last_running_hrs);
+        const runningHours = Number(Math.max(0, lastHours - firstHours).toFixed(2));
+
+        const firstKwh = row.first_kwh !== null ? Number(row.first_kwh) : null;
+        const lastKwh  = row.last_kwh  !== null ? Number(row.last_kwh)  : null;
+        const kwhConsumed =
+          firstKwh !== null && lastKwh !== null
+            ? Number(Math.max(0, lastKwh - firstKwh).toFixed(2))
+            : 0;
+
+        const avgKwh = runningHours > 0
+          ? Number((kwhConsumed / runningHours).toFixed(2))
+          : null;
+
+        map[row.vehicle_master_id] = {
+          vehicle_master_id: row.vehicle_master_id,
+          running_hours: runningHours,
+          kwh_consumed:  kwhConsumed,
+          avg_kwh:       avgKwh,
+        };
+      }
+
+      // Vehicles with no data in range return zeros
+      for (const id of vehicleIds) {
+        if (!map[id]) {
+          map[id] = {
+            vehicle_master_id: id,
+            running_hours: 0,
+            kwh_consumed:  0,
+            avg_kwh:       null,
+          };
+        }
+      }
+
+      res.json(map);
+    } catch (err) {
+      logger.error(`GET /vehicles/analytics/batch error: ${err.message}`);
+      res.status(500).json({ error: 'Server error' });
+    }
+  }
+);
+
+/* ============================================================
    GET /api/vehicles/:id — Vehicle summary + latest ODO/kWh
 ============================================================ */
 router.get(
@@ -389,17 +562,21 @@ router.get(
         return res.status(400).json({ error: 'Start date cannot be after end date' });
       }
 
-      // 3. Fetch first + last valid records in a single query (one round-trip)
+      // 3. Baseline + last record in one query.
+      //    baseline: last record BEFORE window opens — the odometer value
+      //    at period start, regardless of when the first packet of the day arrives.
+      //    last: last record inside the window.
+      //    Delta = last - baseline = usage during the period.
       const rangeRes = await db.query(
         `
         (
-          SELECT total_running_hrs, total_kwh_consumed, 'first' AS _pos
+          SELECT total_running_hrs, total_kwh_consumed, 'baseline' AS _pos
           FROM live_values
           WHERE vehicle_master_id = $1
-            AND recorded_at >= $2
+            AND recorded_at < $2
             AND total_running_hrs  IS NOT NULL
             AND total_kwh_consumed IS NOT NULL
-          ORDER BY recorded_at ASC
+          ORDER BY recorded_at DESC
           LIMIT 1
         )
         UNION ALL
@@ -407,6 +584,7 @@ router.get(
           SELECT total_running_hrs, total_kwh_consumed, 'last' AS _pos
           FROM live_values
           WHERE vehicle_master_id = $1
+            AND recorded_at >= $2
             AND recorded_at <= $3
             AND total_running_hrs  IS NOT NULL
             AND total_kwh_consumed IS NOT NULL
@@ -417,7 +595,7 @@ router.get(
         [id, startTime, endTime]
       );
 
-      const firstRow = rangeRes.rows.find(r => r._pos === 'first');
+      const firstRow = rangeRes.rows.find(r => r._pos === 'baseline');
       const lastRow  = rangeRes.rows.find(r => r._pos === 'last');
 
       const emptyResponse = {
