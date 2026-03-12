@@ -13,19 +13,11 @@ const router = express.Router();
    SHARED HELPERS
    ============================================================ */
 
-/**
- * Validate and parse the vehicle ID from request params.
- * Returns the numeric ID or null if invalid.
- */
 function parseVehicleId(id) {
   const n = Number(id);
   return id && !isNaN(n) && n > 0 ? n : null;
 }
 
-/**
- * Build the WHERE time clause and append params.
- * Returns { timeClause, params } or throws { status, error }.
- */
 function buildTimeClause(query, baseParams = []) {
   const { date, period, start, end } = query;
   const params = [...baseParams];
@@ -77,10 +69,6 @@ function buildTimeClause(query, baseParams = []) {
   return { timeClause, params };
 }
 
-/**
- * Confirm the requesting user has access to the vehicle.
- * Uses the shared pool (not a dedicated client).
- */
 async function checkOwnership(vehicleId, user) {
   const isCustomer = user.role === 'customer';
   const result = await db.query(
@@ -94,9 +82,6 @@ async function checkOwnership(vehicleId, user) {
   return result.rows.length > 0;
 }
 
-/**
- * Format a JS Date to IST locale string.
- */
 function toIST(date) {
   return date.toLocaleString('en-IN', {
     timeZone: 'Asia/Kolkata',
@@ -115,86 +100,117 @@ function toIST(date) {
    ============================================================ */
 
 const ALL_COLUMN_DEFS = [
-  { key: 'recorded_at',                 label: 'Timestamp',                      alwaysInclude: true },
-  { key: 'soc_percent',                 label: 'SOC (%)' },
-  { key: 'battery_status',              label: 'Battery Status' },
-  { key: 'stack_voltage_v',             label: 'Stack Voltage (V)' },
-  { key: 'battery_current_a',           label: 'Battery Current (A)' },
-  { key: 'output_power_kw',             label: 'Output Power (kW)',              computed: true },
-  { key: 'charger_current_demand_a',    label: 'Charger Current Demand (A)' },
-  { key: 'charger_voltage_demand_v',    label: 'Charger Voltage Demand (V)' },
-  { key: 'max_voltage_v',               label: 'Max Cell Voltage (V)' },
-  { key: 'min_voltage_v',               label: 'Min Cell Voltage (V)' },
-  { key: 'avg_voltage_v',               label: 'Avg Cell Voltage (V)' },
-  { key: 'max_temp_c',                  label: 'Max Battery Temp (°C)' },
-  { key: 'min_temp_c',                  label: 'Min Battery Temp (°C)' },
-  { key: 'avg_temp_c',                  label: 'Avg Battery Temp (°C)' },
-  { key: 'motor_torque_limit',          label: 'Motor Torque Limit (Nm)' },
-  { key: 'motor_torque_value',          label: 'Motor Torque Value (Nm)' },
-  { key: 'motor_speed_rpm',             label: 'Motor Speed (RPM)' },
-  { key: 'motor_rotation_dir',          label: 'Motor Rotation Direction' },
-  { key: 'motor_operation_mode',        label: 'Motor Operation Mode' },
-  { key: 'mcu_enable_state',            label: 'MCU Enable State' },
-  { key: 'motor_ac_current_a',          label: 'Motor AC Current (A)' },
-  { key: 'motor_ac_voltage_v',          label: 'Motor AC Voltage (V)' },
-  { key: 'dc_side_voltage_v',           label: 'DC Side Voltage (V)' },
-  { key: 'motor_temp_c',                label: 'Motor Temperature (°C)' },
-  { key: 'mcu_temp_c',                  label: 'MCU Temperature (°C)' },
-  { key: 'radiator_temp_c',             label: 'Radiator Temperature (°C)' },
-  { key: 'motor_status_word',           label: 'Motor Status Word' },
-  { key: 'motor_freq_raw',              label: 'Motor Frequency Raw' },
-  { key: 'motor_total_wattage_w',       label: 'Motor Total Wattage (W)' },
-  { key: 'btms_command_mode',           label: 'BTMS Command Mode' },
-  { key: 'btms_status_mode',            label: 'BTMS Status Mode' },
-  { key: 'btms_hv_request',             label: 'BTMS HV Request' },
-  { key: 'btms_charge_status',          label: 'BTMS Charge Status' },
-  { key: 'bms_hv_relay_state',          label: 'BMS HV Relay State' },
-  { key: 'btms_hv_relay_state',         label: 'BTMS HV Relay State' },
-  { key: 'btms_target_temp_c',          label: 'BTMS Target Temp (°C)' },
-  { key: 'btms_inlet_temp_c',           label: 'BTMS Inlet Temp (°C)' },
-  { key: 'btms_outlet_temp_c',          label: 'BTMS Outlet Temp (°C)' },
-  { key: 'btms_demand_power_kw',        label: 'BTMS Demand Power (kW)' },
-  { key: 'bms_pack_voltage_v',          label: 'BMS Pack Voltage (V)' },
-  { key: 'bms_life_counter',            label: 'BMS Life Counter' },
-  { key: 'btms_command_crc',            label: 'BTMS Command CRC' },
-  { key: 'dcdc_pri_a_mosfet_temp_c',   label: 'DCDC Pri A MOSFET Temp (°C)' },
-  { key: 'dcdc_sec_ls_mosfet_temp_c',  label: 'DCDC Sec LS MOSFET Temp (°C)' },
-  { key: 'dcdc_sec_hs_mosfet_temp_c',  label: 'DCDC Sec HS MOSFET Temp (°C)' },
-  { key: 'dcdc_pri_c_mosfet_temp_c',   label: 'DCDC Pri C MOSFET Temp (°C)' },
-  { key: 'dcdc_max_temp_c',            label: 'DCDC Max Temp (°C)' },
-  { key: 'dcdc_input_voltage_v',       label: 'DCDC Input Voltage (V)' },
-  { key: 'dcdc_input_current_a',       label: 'DCDC Input Current (A)' },
-  { key: 'dcdc_output_voltage_v',      label: 'DCDC Output Voltage (V)' },
-  { key: 'dcdc_output_current_a',      label: 'DCDC Output Current (A)' },
-  { key: 'dcdc_occurence_count',       label: 'DCDC Overcurrent Count' },
-  { key: 'compressor_input_voltage_v', label: 'Compressor Input Voltage (V)' },
-  { key: 'compressor_input_current_a', label: 'Compressor Input Current (A)' },
-  { key: 'compressor_output_voltage_v',label: 'Compressor Output Voltage (V)' },
-  { key: 'compressor_output_current_a',label: 'Compressor Output Current (A)' },
-  { key: 'total_running_hrs',          label: 'Total Running Hours',            interval: true },
-  { key: 'last_trip_hrs',              label: 'Last Trip Hours',                interval: true },
-  { key: 'total_kwh_consumed',         label: 'Total kWh Consumed' },
-  { key: 'last_trip_kwh',              label: 'Last Trip kWh' },
+  { key: 'recorded_at',                    label: 'Timestamp',                        alwaysInclude: true },
+  // Battery / BMS / Charger
+  { key: 'soc_percent',                    label: 'SOC (%)' },
+  { key: 'battery_status',                 label: 'Battery Status' },
+  { key: 'stack_voltage_v',                label: 'Stack Voltage (V)' },
+  { key: 'battery_current_a',              label: 'Battery Current (A)' },
+  { key: 'output_power_kw',                label: 'Output Power (kW)',                computed: true },
+  { key: 'charger_current_demand_a',       label: 'Charger Current Demand (A)' },
+  { key: 'charger_voltage_demand_v',       label: 'Charger Voltage Demand (V)' },
+  { key: 'max_voltage_v',                  label: 'Max Cell Voltage (V)' },
+  { key: 'min_voltage_v',                  label: 'Min Cell Voltage (V)' },
+  { key: 'avg_voltage_v',                  label: 'Avg Cell Voltage (V)' },
+  { key: 'max_temp_c',                     label: 'Max Battery Temp (°C)' },
+  { key: 'min_temp_c',                     label: 'Min Battery Temp (°C)' },
+  { key: 'avg_temp_c',                     label: 'Avg Battery Temp (°C)' },
+  // Motor / MCU
+  { key: 'motor_torque_limit',             label: 'Motor Torque Limit (Nm)' },
+  { key: 'motor_torque_value',             label: 'Motor Torque Value (Nm)' },
+  { key: 'motor_speed_rpm',                label: 'Motor Speed (RPM)' },
+  { key: 'motor_rotation_dir',             label: 'Motor Rotation Direction' },
+  { key: 'motor_operation_mode',           label: 'Motor Operation Mode' },
+  { key: 'mcu_enable_state',               label: 'MCU Enable State' },
+  { key: 'motor_ac_current_a',             label: 'Motor AC Current (A)' },
+  { key: 'motor_ac_voltage_v',             label: 'Motor AC Voltage (V)' },
+  { key: 'dc_side_voltage_v',              label: 'DC Side Voltage (V)' },
+  { key: 'motor_temp_c',                   label: 'Motor Temperature (°C)' },
+  { key: 'mcu_temp_c',                     label: 'MCU Temperature (°C)' },
+  { key: 'radiator_temp_c',                label: 'Radiator Temperature (°C)' },
+  { key: 'motor_status_word',              label: 'Motor Status Word' },
+  { key: 'motor_freq_raw',                 label: 'Motor Frequency Raw' },
+  { key: 'motor_total_wattage_w',          label: 'Motor Total Wattage (W)' },
+  // BTMS
+  { key: 'btms_command_mode',              label: 'BTMS Command Mode' },
+  { key: 'btms_status_mode',               label: 'BTMS Status Mode' },
+  { key: 'btms_hv_request',               label: 'BTMS HV Request' },
+  { key: 'btms_charge_status',             label: 'BTMS Charge Status' },
+  { key: 'bms_hv_relay_state',             label: 'BMS HV Relay State' },
+  { key: 'btms_hv_relay_state',            label: 'BTMS HV Relay State' },
+  { key: 'btms_target_temp_c',             label: 'BTMS Target Temp (°C)' },
+  { key: 'btms_inlet_temp_c',              label: 'BTMS Inlet Temp (°C)' },
+  { key: 'btms_outlet_temp_c',             label: 'BTMS Outlet Temp (°C)' },
+  { key: 'btms_demand_power_kw',           label: 'BTMS Demand Power (kW)' },
+  { key: 'bms_pack_voltage_v',             label: 'BMS Pack Voltage (V)' },
+  { key: 'bms_life_counter',               label: 'BMS Life Counter' },
+  { key: 'btms_command_crc',               label: 'BTMS Command CRC' },
+  // DC-DC Converter
+  { key: 'dcdc_pri_a_mosfet_temp_c',      label: 'DCDC Pri A MOSFET Temp (°C)' },
+  { key: 'dcdc_sec_ls_mosfet_temp_c',     label: 'DCDC Sec LS MOSFET Temp (°C)' },
+  { key: 'dcdc_sec_hs_mosfet_temp_c',     label: 'DCDC Sec HS MOSFET Temp (°C)' },
+  { key: 'dcdc_pri_c_mosfet_temp_c',      label: 'DCDC Pri C MOSFET Temp (°C)' },
+  { key: 'dcdc_max_temp_c',               label: 'DCDC Max Temp (°C)' },
+  { key: 'dcdc_input_voltage_v',          label: 'DCDC Input Voltage (V)' },
+  { key: 'dcdc_input_current_a',          label: 'DCDC Input Current (A)' },
+  { key: 'dcdc_output_voltage_v',         label: 'DCDC Output Voltage (V)' },
+  { key: 'dcdc_output_current_a',         label: 'DCDC Output Current (A)' },
+  { key: 'dcdc_occurence_count',          label: 'DCDC Overcurrent Count' },
+  // Air Compressor
+  { key: 'compressor_input_voltage_v',    label: 'Compressor Input Voltage (V)' },
+  { key: 'compressor_input_current_a',    label: 'Compressor Input Current (A)' },
+  { key: 'compressor_output_voltage_v',   label: 'Compressor Output Voltage (V)' },
+  { key: 'compressor_output_current_a',   label: 'Compressor Output Current (A)' },
+  // ODO / Trip
+  { key: 'total_running_hrs',             label: 'Total Running Hours',             interval: true },
+  { key: 'last_trip_hrs',                 label: 'Last Trip Hours',                 interval: true },
+  { key: 'total_kwh_consumed',            label: 'Total kWh Consumed' },
+  { key: 'last_trip_kwh',                 label: 'Last Trip kWh' },
+  // EVCC1 — EV Charging Controller
+  { key: 'evcc1_pwr_stat',               label: 'EVCC1 Power Status' },
+  { key: 'evcc1_socket_stat',            label: 'EVCC1 Socket Status' },
+  { key: 'evcc1_evse_stat',              label: 'EVCC1 EVSE Status' },
+  { key: 'evcc1_cp_stat',                label: 'EVCC1 CP State' },
+  { key: 'evcc1_s2_on_stat',             label: 'EVCC1 S2 Switch' },
+  { key: 'evcc1_pd_stat',                label: 'EVCC1 PD Status' },
+  { key: 'evcc1_step_num',               label: 'EVCC1 Step Number' },
+  { key: 'evcc1_dcac_chg_mode',          label: 'EVCC1 DC/AC Charge Mode' },
+  { key: 'evcc1_chg_finished',           label: 'EVCC1 Charge Finished (EVCC)' },
+  { key: 'evcc1_evse_chg_finished',      label: 'EVCC1 Charge Finished (EVSE)' },
+  { key: 'evcc1_evse_evcc_chg_finished', label: 'EVCC1 Charge Finished (Joint)' },
+  { key: 'evcc1_evse_processing',        label: 'EVCC1 EVSE Processing' },
+  { key: 'evcc1_evse_pwr_delivery',      label: 'EVCC1 Power Delivery' },
+  { key: 'evcc1_evse_isol_stat',         label: 'EVCC1 Isolation Status' },
+  { key: 'evcc1_evse_transfer_type',     label: 'EVCC1 Transfer Type' },
+  { key: 'evcc1_evse_notification',      label: 'EVCC1 EVSE Notification' },
+  { key: 'evcc1_evse_max_volt_v',        label: 'EVCC1 EVSE Max Voltage (V)' },
+  { key: 'evcc1_evse_min_volt_v',        label: 'EVCC1 EVSE Min Voltage (V)' },
+  { key: 'evcc1_evse_max_curr_a',        label: 'EVCC1 EVSE Max Current (A)' },
+  { key: 'evcc1_evse_min_curr_a',        label: 'EVCC1 EVSE Min Current (A)' },
+  { key: 'evcc1_evse_max_pwr_w',         label: 'EVCC1 EVSE Max Power (W)' },
+  { key: 'evcc1_evse_max_delay_s',       label: 'EVCC1 EVSE Max Delay (s)' },
+  { key: 'evcc1_evse_out_volt_v',        label: 'EVCC1 EVSE Output Voltage (V)' },
+  { key: 'evcc1_evse_out_curr_a',        label: 'EVCC1 EVSE Output Current (A)' },
+  { key: 'evcc1_ac_max_current_value_a', label: 'EVCC1 AC Max Current (A)' },
+  { key: 'evcc1_duty_value',             label: 'EVCC1 Duty Value (%)' },
+  { key: 'evcc1_aag_value',              label: 'EVCC1 AAG Value' },
+  { key: 'evcc1_lock_stat',              label: 'EVCC1 Lock Command' },
+  { key: 'evcc1_lock_status',            label: 'EVCC1 Lock Status' },
+  { key: 'evcc1_lock_alarm',             label: 'EVCC1 Lock Alarm' },
+  { key: 'evcc1_error_code',             label: 'EVCC1 Error Code' },
 ];
 
 const ALL_COLUMN_MAP = Object.fromEntries(ALL_COLUMN_DEFS.map(c => [c.key, c]));
 
-/**
- * Build a SQL SELECT expression for a column key.
- */
 function colToSQL(key) {
   const def = ALL_COLUMN_MAP[key];
   if (!def) return key;
-  if (def.interval)  return `to_char(${key}, 'HH24:MI:SS') AS ${key}`;
+  if (def.interval) return `to_char(${key}, 'HH24:MI:SS') AS ${key}`;
   if (def.computed && key === 'output_power_kw')
     return `ROUND(CAST((stack_voltage_v * ABS(battery_current_a)) / 1000.0 AS numeric), 3) AS output_power_kw`;
   return key;
 }
 
-/**
- * Parse and validate the ?columns= query param.
- * Returns an array of valid column keys, or ALL_COLUMN_DEFS keys if omitted.
- */
 function parseColumns(columnsParam) {
   if (!columnsParam) return ALL_COLUMN_DEFS.map(c => c.key);
 
@@ -209,7 +225,6 @@ function parseColumns(columnsParam) {
     throw { status: 400, error: 'columns must be a JSON array' };
   }
 
-  // Whitelist: only keep keys that exist in our definition list
   const valid = requested.filter(k => ALL_COLUMN_MAP[k]);
   if (valid.length === 0) {
     throw { status: 400, error: 'No valid columns specified' };
@@ -219,7 +234,6 @@ function parseColumns(columnsParam) {
 
 /* ============================================================
    GET /api/database-logs/:id
-   Cursor-paginated rows for the frontend table (200 rows/page).
    ============================================================ */
 router.get(
   '/:id',
@@ -247,7 +261,6 @@ router.get(
         return res.status(403).json([]);
       }
 
-      // Build the SELECT list from ALL columns (the table always shows everything)
       const selectFields = ALL_COLUMN_DEFS.map(c => colToSQL(c.key)).join(',\n          ');
 
       let cursorClause = '';
@@ -289,7 +302,6 @@ router.get(
 
 /* ============================================================
    GET /api/database-logs/:id/count
-   Returns the total row count for a given time range.
    ============================================================ */
 router.get(
   '/:id/count',
@@ -332,14 +344,6 @@ router.get(
 
 /* ============================================================
    GET /api/database-logs/:id/export
-   Streaming CSV export – handles millions of rows.
-
-   Key optimisations vs original:
-   1. Single aggregated query to detect empty columns (was N parallel queries).
-   2. Statement timeout prevents indefinite hangs.
-   3. Dedicated pg client kept only for the cursor lifespan; released in finally.
-   4. Ownership + count reuse the shared pool so the dedicated client is
-      acquired as late as possible.
    ============================================================ */
 router.get(
   '/:id/export',
@@ -350,7 +354,6 @@ router.get(
     const vehicleId = parseVehicleId(req.params.id);
     if (!vehicleId) return res.status(400).json({ error: 'Invalid vehicle ID' });
 
-    // ---- parse columns ----
     let columnKeys;
     try {
       columnKeys = parseColumns(req.query.columns);
@@ -358,7 +361,6 @@ router.get(
       return res.status(e.status).json({ error: e.error });
     }
 
-    // ---- build time clause ----
     let timeInfo;
     try {
       timeInfo = buildTimeClause(req.query, [vehicleId]);
@@ -368,7 +370,6 @@ router.get(
 
     const { timeClause, params } = timeInfo;
 
-    // ---- ownership check (shared pool) ----
     try {
       const allowed = await checkOwnership(vehicleId, req.user);
       if (!allowed) {
@@ -380,7 +381,6 @@ router.get(
       return res.status(500).json({ error: 'Internal error' });
     }
 
-    // ---- get total row count (shared pool) ----
     let totalRows = 0;
     try {
       const countResult = await db.query(
@@ -402,27 +402,18 @@ router.get(
 
     logger.info(`Export starting – vehicle ${vehicleId}: ${totalRows} rows, ${columnKeys.length} requested columns`);
 
-    // ---- acquire dedicated client for cursor streaming ----
     let client;
     try {
       client = await db.getClient();
-
-      // Hard timeout: never let an export hang indefinitely
       await client.query("SET statement_timeout = '180s'");
 
-      /* ----------------------------------------------------------
-         STEP 1 – detect empty columns with ONE aggregated query
-         (replaces the original N parallel queries)
-         ---------------------------------------------------------- */
-      const regularKeys  = columnKeys.filter(k => k !== 'recorded_at' && k !== 'output_power_kw');
-      const hasComputed  = columnKeys.includes('output_power_kw');
+      const regularKeys = columnKeys.filter(k => k !== 'recorded_at' && k !== 'output_power_kw');
+      const hasComputed = columnKeys.includes('output_power_kw');
 
-      // Build COUNT(col) expressions for all plain columns in one shot
       const countExprs = regularKeys
         .map(k => `COUNT(${k}) AS ${k}`)
         .join(',\n          ');
 
-      // output_power_kw is valid when both source columns are non-null
       const computedExpr = hasComputed
         ? `, COUNT(CASE WHEN stack_voltage_v IS NOT NULL AND battery_current_a IS NOT NULL THEN 1 END) AS output_power_kw`
         : '';
@@ -439,9 +430,8 @@ router.get(
       const checkResult = await client.query(emptyCheckSQL, params);
       const counts = checkResult.rows[0];
 
-      // Decide which columns actually have data
       const activeColumnKeys = columnKeys.filter(key => {
-        if (key === 'recorded_at') return true;          // always present
+        if (key === 'recorded_at') return true;
         return parseInt(counts[key] ?? '0', 10) > 0;
       });
 
@@ -458,9 +448,6 @@ router.get(
         logger.info(`Skipped ${skipped} empty columns. Exporting ${activeColumnKeys.length} columns.`);
       }
 
-      /* ----------------------------------------------------------
-         STEP 2 – build SELECT for the export query
-         ---------------------------------------------------------- */
       const selectFields = activeColumnKeys.map(k => colToSQL(k)).join(',\n          ');
 
       const exportSQL = `
@@ -472,9 +459,6 @@ router.get(
         ORDER BY recorded_at ASC
       `;
 
-      /* ----------------------------------------------------------
-         STEP 3 – stream CSV via server-side cursor
-         ---------------------------------------------------------- */
       const { period, date, start, end } = req.query;
       const rangeTag = period || date || `${start}_to_${end}`;
       const filename = `telemetry_${vehicleId}_${rangeTag}_${Date.now()}.csv`;
@@ -484,7 +468,6 @@ router.get(
       res.setHeader('Transfer-Encoding', 'chunked');
       res.setHeader('X-Total-Rows', totalRows.toString());
 
-      // CSV header row
       const csvHeader = activeColumnLabels.map(l => `"${l}"`).join(',') + '\n';
       res.write(csvHeader);
 
@@ -506,22 +489,14 @@ router.get(
         const csvChunk = rows.map(row =>
           activeColumnKeys.map(key => {
             let val = row[key];
-
-            // Format timestamp to IST
-            if (key === 'recorded_at' && val instanceof Date) {
-              val = toIST(val);
-            }
-
+            if (key === 'recorded_at' && val instanceof Date) val = toIST(val);
             if (val === null || val === undefined) return '';
-
-            // Escape double-quotes and wrap in quotes
             return `"${String(val).replace(/"/g, '""')}"`;
           }).join(',')
         ).join('\n') + '\n';
 
         res.write(csvChunk);
 
-        // Log progress every 50k rows
         if (chunkCount % 10 === 0) {
           logger.info(`Export progress – vehicle ${vehicleId}: ${rowCount}/${totalRows} rows (${((rowCount / totalRows) * 100).toFixed(1)}%)`);
         }
@@ -535,16 +510,13 @@ router.get(
 
     } catch (err) {
       logger.error(`Export error (vehicle ${vehicleId}): ${err.message}`);
-
       if (client) {
         try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
       }
-
       if (!res.headersSent) {
         return res.status(500).json({ error: 'Export failed' });
       }
       res.end();
-
     } finally {
       if (client) client.release();
     }
