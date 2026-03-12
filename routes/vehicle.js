@@ -1,4 +1,4 @@
-// routes/vehicle.js - OPTIMIZED & FIXED VERSION with improved /analytics
+// routes/vehicle.js
 const express = require('express');
 const db = require('../config/postgres');
 const authenticateToken = require('../middleware/auth');
@@ -6,7 +6,6 @@ const checkPermission = require('../middleware/checkPermission');
 const { generalLimiter, liveRateLimiter } = require('../middleware/rateLimiter');
 const logger = require('../utils/logger');
 const { formatLiveData } = require('../utils/formatLiveData');
-// Shared cache from dedicated service
 const {
   liveCache,
   cleanupLiveCache,
@@ -14,6 +13,66 @@ const {
 } = require('../services/liveCache');
 
 const router = express.Router();
+
+/* =========================
+   SHARED HELPERS
+========================= */
+
+/**
+ * Parses and validates a route :id param.
+ * Returns a positive integer or null.
+ */
+const parseVehicleId = (raw) => {
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+/**
+ * Checks whether the authenticated user may access a given vehicle.
+ * Admins (non-customer role) always pass.
+ * Customers are restricted to vehicles under their user_id.
+ * Returns true/false.
+ */
+const checkVehicleAccess = async (vehicleId, userId, isCustomer) => {
+  const result = await db.query(
+    `
+    SELECT EXISTS(
+      SELECT 1
+      FROM vehicle_master vm
+      JOIN customer_master cm ON vm.customer_id = cm.customer_id
+      WHERE vm.vehicle_master_id = $1
+        AND ($2::int IS NULL OR cm.user_id = $2)
+    ) AS allowed
+    `,
+    [vehicleId, isCustomer ? userId : null]
+  );
+  return result.rows[0]?.allowed === true;
+};
+
+/**
+ * Converts a Postgres interval object returned by node-postgres
+ * into decimal hours.
+ */
+const intervalToHours = (interval) => {
+  if (!interval) return null;
+  const { days = 0, hours = 0, minutes = 0, seconds = 0 } = interval;
+  return days * 24 + hours + minutes / 60 + seconds / 3600;
+};
+
+/**
+ * Coerces a value to a finite number or null.
+ */
+const toNumber = (v) => {
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+/* =========================
+   Cache maintenance on a timer — NOT on every request.
+   Doing it per-request adds unnecessary overhead on hot endpoints.
+========================= */
+setInterval(cleanupLiveCache, 60_000);
 
 /* ============================================================
    GET /api/vehicles — List accessible vehicles
@@ -40,8 +99,8 @@ router.get(
           vm.hmi_make_model,
           vm.date_of_deployment
         FROM vehicle_master vm
-        JOIN customer_master cm ON vm.customer_id = cm.customer_id
-        JOIN vehicle_type_master vt ON vm.vtype_id = vt.vtype_id
+        JOIN customer_master cm     ON vm.customer_id = cm.customer_id
+        JOIN vehicle_type_master vt ON vm.vtype_id    = vt.vtype_id
         WHERE ($1::int IS NULL OR cm.user_id = $1)
         ORDER BY vm.vehicle_unique_id
         `,
@@ -64,7 +123,9 @@ router.get(
   generalLimiter,
   checkPermission('vehicles', 'read'),
   async (req, res) => {
-    const { id } = req.params;
+    const id = parseVehicleId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid vehicle ID' });
+
     const isCustomer = req.user.role === 'customer';
     try {
       const result = await db.query(
@@ -78,24 +139,19 @@ router.get(
             vt.model,
             vm.date_of_deployment
           FROM vehicle_master vm
-          JOIN customer_master cm ON vm.customer_id = cm.customer_id
-          JOIN vehicle_type_master vt ON vm.vtype_id = vt.vtype_id
+          JOIN customer_master cm     ON vm.customer_id = cm.customer_id
+          JOIN vehicle_type_master vt ON vm.vtype_id    = vt.vtype_id
           WHERE vm.vehicle_master_id = $1
             AND ($2::int IS NULL OR cm.user_id = $2)
         ),
         latest_live AS (
-          SELECT
-            total_running_hrs,
-            total_kwh_consumed
+          SELECT total_running_hrs, total_kwh_consumed
           FROM live_values
           WHERE vehicle_master_id = $1
           ORDER BY recorded_at DESC
           LIMIT 1
         )
-        SELECT
-          vi.*,
-          ll.total_running_hrs,
-          ll.total_kwh_consumed
+        SELECT vi.*, ll.total_running_hrs, ll.total_kwh_consumed
         FROM vehicle_info vi
         LEFT JOIN latest_live ll ON true
         `,
@@ -108,26 +164,14 @@ router.get(
 
       const row = result.rows[0];
 
-      const intervalToHours = (interval) => {
-        if (!interval) return null;
-        const { days = 0, hours = 0, minutes = 0, seconds = 0 } = interval;
-        return days * 24 + hours + minutes / 60 + seconds / 3600;
-      };
-
-      const toNumber = (v) => {
-        if (v === null || v === undefined) return null;
-        const n = Number(v);
-        return Number.isFinite(n) ? n : null;
-      };
-
       res.json({
         vehicle_master_id: row.vehicle_master_id,
-        company_name: row.company_name,
-        make: row.make,
-        model: row.model,
-        vehicle_reg_no: row.vehicle_reg_no,
-        total_hours: toNumber(intervalToHours(row.total_running_hrs)),
-        total_kwh: toNumber(row.total_kwh_consumed),
+        company_name:      row.company_name,
+        make:              row.make,
+        model:             row.model,
+        vehicle_reg_no:    row.vehicle_reg_no,
+        total_hours:       toNumber(intervalToHours(row.total_running_hrs)),
+        total_kwh:         toNumber(row.total_kwh_consumed),
         date_of_deployment: row.date_of_deployment,
       });
     } catch (err) {
@@ -146,53 +190,48 @@ router.get(
   checkPermission('live_view', 'read'),
   liveRateLimiter,
   async (req, res) => {
-    const { id } = req.params;
+    const id = parseVehicleId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid vehicle ID' });
+
     const isCustomer = req.user.role === 'customer';
-    const cacheKey = `vehicle_live:${id}`;
-    const now = Date.now();
+    const cacheKey   = `vehicle_live:${id}`;
+    const now        = Date.now();
 
     try {
-      cleanupLiveCache();
+      // --- Fast path: serve from cache ---
       let entry = liveCache.get(cacheKey);
-
       if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
         return res.json(entry.data);
       }
 
-      const ownership = await db.query(
-        `
-        SELECT EXISTS(
-          SELECT 1
-          FROM vehicle_master vm
-          JOIN customer_master cm ON vm.customer_id = cm.customer_id
-          WHERE vm.vehicle_master_id = $1
-            AND ($2::int IS NULL OR cm.user_id = $2)
-        ) as allowed
-        `,
-        [id, isCustomer ? req.user.user_id : null]
-      );
+      // --- Ownership check ---
+      const allowed = await checkVehicleAccess(id, req.user.user_id, isCustomer);
+      if (!allowed) return res.json({});
 
-      if (!ownership.rows[0]?.allowed) {
-        return res.json({});
-      }
-
+      // --- Re-check cache: another concurrent request may have populated it
+      //     while we were waiting on the ownership query ---
       entry = liveCache.get(cacheKey);
       if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
         return res.json(entry.data);
       }
 
+      // --- In-flight deduplication: attach to an existing DB fetch
+      //     rather than spawning a second parallel query for the same vehicle ---
       if (entry?.inflight) {
         try {
           const data = await Promise.race([
             entry.inflight,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Inflight timeout')), 5000)),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('Inflight timeout')), 5000)
+            ),
           ]);
           return res.json(data);
         } catch {
-          // timeout → fall through
+          // timed out — fall through to a fresh fetch
         }
       }
 
+      // --- Fresh DB fetch ---
       const inflightPromise = (async () => {
         try {
           const result = await db.query(
@@ -227,8 +266,9 @@ router.get(
 
 /* ============================================================
    GET /api/vehicles/:id/timeseries?minutes=5
-   Returns recent rows for charting — only the fields needed
-   by LiveCharts plus recorded_at for the time axis.
+   Returns recent rows for charting.
+   Anchors to MAX(recorded_at) in the table — immune to
+   DB/Node clock skew on cloud deployments.
 ============================================================ */
 router.get(
   '/:id/timeseries',
@@ -236,37 +276,21 @@ router.get(
   generalLimiter,
   checkPermission('live_view', 'read'),
   async (req, res) => {
-    const { id } = req.params;
+    const id = parseVehicleId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid vehicle ID' });
+
     const isCustomer = req.user.role === 'customer';
 
     // Clamp minutes between 1 and 60 to prevent abuse
     const rawMinutes = parseInt(req.query.minutes ?? '5', 10);
-    const minutes = Number.isFinite(rawMinutes)
+    const minutes    = Number.isFinite(rawMinutes)
       ? Math.min(Math.max(rawMinutes, 1), 60)
       : 5;
 
     try {
-      // Ownership check
-      const ownership = await db.query(
-        `
-        SELECT EXISTS(
-          SELECT 1
-          FROM vehicle_master vm
-          JOIN customer_master cm ON vm.customer_id = cm.customer_id
-          WHERE vm.vehicle_master_id = $1
-            AND ($2::int IS NULL OR cm.user_id = $2)
-        ) AS allowed
-        `,
-        [id, isCustomer ? req.user.user_id : null]
-      );
+      const allowed = await checkVehicleAccess(id, req.user.user_id, isCustomer);
+      if (!allowed) return res.status(403).json({ error: 'Access denied' });
 
-      if (!ownership.rows[0]?.allowed) {
-        return res.status(403).json({ error: 'Access denied' });
-      }
-
-      // DB clock may differ from Node clock (timezone skew on cloud DBs).
-      // Strategy: anchor to MAX recorded_at in table, walk back `minutes` from there.
-      // This is immune to any DB/Node clock mismatch.
       const anchorRes = await db.query(
         `SELECT MAX(recorded_at) AS latest FROM live_values WHERE vehicle_master_id = $1`,
         [id]
@@ -286,12 +310,12 @@ router.get(
             WHEN stack_voltage_v IS NOT NULL AND battery_current_a IS NOT NULL
             THEN ROUND((stack_voltage_v * ABS(battery_current_a)) / 1000.0, 4)
             ELSE NULL
-          END                       AS output_power_kw,
+          END               AS output_power_kw,
           motor_speed_rpm,
-          motor_torque_value        AS motor_torque_nm,
-          battery_current_a         AS dc_current_a,
-          motor_ac_current_a        AS ac_current_a,
-          motor_ac_voltage_v        AS ac_voltage_v
+          motor_torque_value AS motor_torque_nm,
+          battery_current_a  AS dc_current_a,
+          motor_ac_current_a AS ac_current_a,
+          motor_ac_voltage_v AS ac_voltage_v
         FROM live_values
         WHERE vehicle_master_id = $1
           AND recorded_at >= $2::timestamptz - (INTERVAL '1 minute' * $3)
@@ -302,7 +326,9 @@ router.get(
         [id, latest, minutes]
       );
 
-      logger.info(`Timeseries vehicle=${id}: ${result.rows.length} rows anchored to ${latest}`);
+      logger.info(
+        `Timeseries vehicle=${id}: ${result.rows.length} rows anchored to ${latest}`
+      );
       res.json(result.rows);
     } catch (err) {
       logger.error(`GET /vehicles/${id}/timeseries error: ${err.message}`);
@@ -313,9 +339,10 @@ router.get(
 
 /* ============================================================
    GET /api/vehicles/:id/analytics
-   - mode=today
-   - OR from=YYYY-MM-DD & to=YYYY-MM-DD
-   - Proper IST timezone handling + fixed invalid records
+   Supports: mode=today  OR  from=YYYY-MM-DD&to=YYYY-MM-DD
+   All times interpreted in IST (Asia/Kolkata, UTC+5:30).
+   First and last valid records fetched in ONE query to save
+   a DB round-trip vs the original two-query approach.
 ============================================================ */
 router.get(
   '/:id/analytics',
@@ -323,45 +350,32 @@ router.get(
   generalLimiter,
   checkPermission('vehicles', 'read'),
   async (req, res) => {
-    const { id } = req.params;
+    const id = parseVehicleId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid vehicle ID' });
+
     const { mode, from, to } = req.query;
     const isCustomer = req.user.role === 'customer';
 
     try {
-      // 1. Ownership check
-      const ownership = await db.query(
-        `
-        SELECT EXISTS(
-          SELECT 1
-          FROM vehicle_master vm
-          JOIN customer_master cm ON vm.customer_id = cm.customer_id
-          WHERE vm.vehicle_master_id = $1
-            AND ($2::int IS NULL OR cm.user_id = $2)
-        ) AS allowed
-        `,
-        [id, isCustomer ? req.user.user_id : null]
-      );
+      // 1. Ownership
+      const allowed = await checkVehicleAccess(id, req.user.user_id, isCustomer);
+      if (!allowed) return res.status(403).json({ error: 'Access denied' });
 
-      if (!ownership.rows[0]?.allowed) {
-        return res.status(403).json({ error: 'Access denied' });
-      }
-
-      // 2. Resolve time range (IST-safe)
+      // 2. Resolve IST-safe time range
       const toISTStart = (d) => new Date(`${d}T00:00:00+05:30`);
-      const toISTEnd = (d) => new Date(`${d}T23:59:59.999+05:30`);
+      const toISTEnd   = (d) => new Date(`${d}T23:59:59.999+05:30`);
 
-      let startTime;
-      let endTime;
+      let startTime, endTime;
 
       if (mode === 'today') {
         const todayIST = new Date().toLocaleDateString('en-CA', {
           timeZone: 'Asia/Kolkata',
         });
         startTime = toISTStart(todayIST);
-        endTime = new Date();
+        endTime   = new Date();
       } else if (from && to) {
         startTime = toISTStart(from);
-        endTime = toISTEnd(to);
+        endTime   = toISTEnd(to);
       } else {
         return res.status(400).json({
           error: 'Invalid request. Use mode=today OR from=YYYY-MM-DD&to=YYYY-MM-DD',
@@ -371,95 +385,81 @@ router.get(
       if (isNaN(startTime.getTime()) || isNaN(endTime.getTime())) {
         return res.status(400).json({ error: 'Invalid date format (use YYYY-MM-DD)' });
       }
-
       if (startTime > endTime) {
         return res.status(400).json({ error: 'Start date cannot be after end date' });
       }
 
-      // 3. Fetch FIRST valid record in range
-      const firstRes = await db.query(
+      // 3. Fetch first + last valid records in a single query (one round-trip)
+      const rangeRes = await db.query(
         `
-        SELECT total_running_hrs, total_kwh_consumed
-        FROM live_values
-        WHERE vehicle_master_id = $1
-          AND recorded_at >= $2
-          AND total_running_hrs IS NOT NULL
-          AND total_kwh_consumed IS NOT NULL
-        ORDER BY recorded_at ASC
-        LIMIT 1
+        (
+          SELECT total_running_hrs, total_kwh_consumed, 'first' AS _pos
+          FROM live_values
+          WHERE vehicle_master_id = $1
+            AND recorded_at >= $2
+            AND total_running_hrs  IS NOT NULL
+            AND total_kwh_consumed IS NOT NULL
+          ORDER BY recorded_at ASC
+          LIMIT 1
+        )
+        UNION ALL
+        (
+          SELECT total_running_hrs, total_kwh_consumed, 'last' AS _pos
+          FROM live_values
+          WHERE vehicle_master_id = $1
+            AND recorded_at <= $3
+            AND total_running_hrs  IS NOT NULL
+            AND total_kwh_consumed IS NOT NULL
+          ORDER BY recorded_at DESC
+          LIMIT 1
+        )
         `,
-        [id, startTime]
+        [id, startTime, endTime]
       );
 
-      // 4. Fetch LAST valid record in range
-      const lastRes = await db.query(
-        `
-        SELECT total_running_hrs, total_kwh_consumed
-        FROM live_values
-        WHERE vehicle_master_id = $1
-          AND recorded_at <= $2
-          AND total_running_hrs IS NOT NULL
-          AND total_kwh_consumed IS NOT NULL
-        ORDER BY recorded_at DESC
-        LIMIT 1
-        `,
-        [id, endTime]
-      );
+      const firstRow = rangeRes.rows.find(r => r._pos === 'first');
+      const lastRow  = rangeRes.rows.find(r => r._pos === 'last');
 
-      if (!lastRes.rows.length) {
-        return res.json({
-          vehicle_master_id: Number(id),
-          mode: mode === 'today' ? 'today' : 'custom',
-          from: startTime.toISOString(),
-          to: endTime.toISOString(),
-          running_hours: 0,
-          kwh_consumed: 0,
-          avg_kwh: null,
-        });
-      }
-
-      const last = lastRes.rows[0];
-      const first = firstRes.rows[0] || last;
-
-      // 5. Compute deltas
-      const intervalToHours = (interval) => {
-        if (!interval) return 0;
-        const { days = 0, hours = 0, minutes = 0, seconds = 0 } = interval;
-        return days * 24 + hours + minutes / 60 + seconds / 3600;
+      const emptyResponse = {
+        vehicle_master_id: id,
+        mode:  mode === 'today' ? 'today' : 'custom',
+        from:  startTime.toISOString(),
+        to:    endTime.toISOString(),
+        running_hours: 0,
+        kwh_consumed:  0,
+        avg_kwh:       null,
       };
 
-      const firstHours = intervalToHours(first.total_running_hrs);
-      const lastHours = intervalToHours(last.total_running_hrs);
+      if (!lastRow) return res.json(emptyResponse);
 
-      if (lastHours === 0 && firstHours === 0) {
-        return res.json({
-          vehicle_master_id: Number(id),
-          mode: mode === 'today' ? 'today' : 'custom',
-          from: startTime.toISOString(),
-          to: endTime.toISOString(),
-          running_hours: 0,
-          kwh_consumed: 0,
-          avg_kwh: null,
-        });
-      }
+      // 4. Compute deltas
+      const firstHours = intervalToHours(firstRow?.total_running_hrs) ?? 0;
+      const lastHours  = intervalToHours(lastRow.total_running_hrs)   ?? 0;
+
+      if (lastHours === 0 && firstHours === 0) return res.json(emptyResponse);
 
       const runningHours = Math.max(0, lastHours - firstHours);
-      const kwhConsumed =
-        last.total_kwh_consumed !== null && first.total_kwh_consumed !== null
-          ? Math.max(0, Number(last.total_kwh_consumed) - Number(first.total_kwh_consumed))
+      const kwhConsumed  =
+        lastRow.total_kwh_consumed !== null &&
+        (firstRow?.total_kwh_consumed ?? null) !== null
+          ? Math.max(
+              0,
+              Number(lastRow.total_kwh_consumed) - Number(firstRow.total_kwh_consumed)
+            )
           : 0;
 
-      const avgKwh = runningHours > 0 ? Number((kwhConsumed / runningHours).toFixed(2)) : null;
+      const avgKwh = runningHours > 0
+        ? Number((kwhConsumed / runningHours).toFixed(2))
+        : null;
 
-      // 6. Response
       res.json({
-        vehicle_master_id: Number(id),
-        mode: mode === 'today' ? 'today' : 'custom',
-        from: startTime.toISOString(),
-        to: endTime.toISOString(),
+        vehicle_master_id: id,
+        mode:          mode === 'today' ? 'today' : 'custom',
+        from:          startTime.toISOString(),
+        to:            endTime.toISOString(),
         running_hours: Number(runningHours.toFixed(2)),
-        kwh_consumed: Number(kwhConsumed.toFixed(2)),
-        avg_kwh: avgKwh,
+        kwh_consumed:  Number(kwhConsumed.toFixed(2)),
+        avg_kwh:       avgKwh,
       });
     } catch (err) {
       logger.error(`GET /vehicles/${id}/analytics error: ${err.message}`);
@@ -470,6 +470,9 @@ router.get(
 
 /* ============================================================
    GET /api/vehicles/:id/stream — SSE live stream
+   Pushes a fresh data frame every second.
+   Uses liveCache to share DB fetches across concurrent clients
+   watching the same vehicle.
 ============================================================ */
 router.get(
   '/:id/stream',
@@ -477,51 +480,38 @@ router.get(
   checkPermission('live_view', 'read'),
   liveRateLimiter,
   async (req, res) => {
-    const { id } = req.params;
-    const user = req.user;
+    const id = parseVehicleId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid vehicle ID' });
+
+    const user       = req.user;
     const isCustomer = user.role === 'customer';
 
+    // Ownership check before opening the long-lived connection
     try {
-      const ownership = await db.query(
-        `
-        SELECT EXISTS(
-          SELECT 1
-          FROM vehicle_master vm
-          JOIN customer_master cm ON vm.customer_id = cm.customer_id
-          WHERE vm.vehicle_master_id = $1
-            AND ($2::int IS NULL OR cm.user_id = $2)
-        ) as allowed
-        `,
-        [id, isCustomer ? user.user_id : null]
-      );
-
-      if (!ownership.rows[0]?.allowed) {
-        return res.status(403).json({ error: 'Access denied' });
-      }
+      const allowed = await checkVehicleAccess(id, user.user_id, isCustomer);
+      if (!allowed) return res.status(403).json({ error: 'Access denied' });
     } catch (err) {
       logger.warn(`SSE ownership check failed for vehicle ${id}: ${err.message}`);
       return res.status(403).json({ error: 'Access denied' });
     }
 
     res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no',
+      'Content-Type':      'text/event-stream',
+      'Cache-Control':     'no-cache',
+      'Connection':        'keep-alive',
+      'X-Accel-Buffering': 'no',        // disable Nginx buffering
     });
 
     res.flushHeaders();
 
-    logger.info(`🟢 SSE connected → user=${user.email}, vehicle=${id}`);
+    logger.info(`SSE connected → user=${user.email}, vehicle=${id}`);
 
     const cacheKey = `vehicle_live:${id}`;
-    cleanupLiveCache();
 
-    let entry = liveCache.get(cacheKey);
-    if (entry?.data) {
-      if (!res.writableEnded) {
-        res.write(`data: ${JSON.stringify(entry.data)}\n\n`);
-      }
+    // Push cached snapshot immediately so the client has data right away
+    const initial = liveCache.get(cacheKey);
+    if (initial?.data && !res.writableEnded) {
+      res.write(`data: ${JSON.stringify(initial.data)}\n\n`);
     }
 
     let missedUpdates = 0;
@@ -533,19 +523,18 @@ router.get(
       }
 
       try {
-        cleanupLiveCache();
-        entry = liveCache.get(cacheKey);
-        const now = Date.now();
+        const now     = Date.now();
+        let   current = liveCache.get(cacheKey);
 
-        if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
-          if (!res.writableEnded) {
-            res.write(`data: ${JSON.stringify(entry.data)}\n\n`);
-          }
+        // --- Cache hit ---
+        if (current?.data && now - current.ts < LIVE_CACHE_TTL_MS) {
+          if (!res.writableEnded) res.write(`data: ${JSON.stringify(current.data)}\n\n`);
           missedUpdates = 0;
           return;
         }
 
-        if (!entry?.inflight) {
+        // --- Start a new fetch if none is already in-flight ---
+        if (!current?.inflight) {
           const inflightPromise = (async () => {
             try {
               const result = await db.query(
@@ -567,38 +556,30 @@ router.get(
           })();
 
           liveCache.set(cacheKey, { ts: now, inflight: inflightPromise });
+          current = { ts: now, inflight: inflightPromise };
+        }
 
+        // --- Wait for the in-flight fetch (ours or someone else's) ---
+        try {
           const data = await Promise.race([
-            inflightPromise,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Fetch timeout')), 5000)),
+            current.inflight,
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('Fetch timeout')), 5000)
+            ),
           ]);
 
           liveCache.set(cacheKey, { ts: Date.now(), data });
 
-          if (!res.writableEnded) {
-            res.write(`data: ${JSON.stringify(data)}\n\n`);
-          }
+          if (!res.writableEnded) res.write(`data: ${JSON.stringify(data)}\n\n`);
           missedUpdates = 0;
-          return;
-        }
-
-        try {
-          const data = await Promise.race([
-            entry.inflight,
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Inflight timeout')), 3000)),
-          ]);
-
-          if (!res.writableEnded) {
-            res.write(`data: ${JSON.stringify(data)}\n\n`);
-          }
-          missedUpdates = 0;
-        } catch (err) {
+        } catch {
           missedUpdates++;
           if (missedUpdates > 5) {
-            logger.warn(`Too many missed updates (${missedUpdates}) → closing SSE for vehicle ${id}`);
+            logger.warn(
+              `Too many missed updates (${missedUpdates}) → closing SSE for vehicle ${id}`
+            );
             if (!res.writableEnded) res.end();
             clearInterval(interval);
-            return;
           }
         }
       } catch (err) {
@@ -606,6 +587,7 @@ router.get(
       }
     }, 1000);
 
+    // Heartbeat keeps the connection alive through proxies and load balancers
     const heartbeat = setInterval(() => {
       if (res.writableEnded) {
         clearInterval(heartbeat);
@@ -622,7 +604,7 @@ router.get(
     req.on('close', () => {
       clearInterval(interval);
       clearInterval(heartbeat);
-      logger.info(`🔴 SSE disconnected → vehicle=${id}`);
+      logger.info(`SSE disconnected → vehicle=${id}`);
     });
 
     res.on('error', (err) => {

@@ -1,23 +1,59 @@
+// routes/telemetry.js
 const express = require('express');
-const router = express.Router();
+const router  = express.Router();
+const crypto  = require('crypto');
 const { insertTelemetryItems } = require('../services/telemetryService');
 const logger = require('../utils/logger');
 
-// POST /api/telemetry
+const MAX_BATCH_SIZE = 500;
+
+/* ============================================================
+   POST /api/telemetry
+   Accepts a JSON body: { items: TelemetryItem[] }
+   Authenticated via x-api-key header (timing-safe comparison).
+============================================================ */
 router.post('/', async (req, res) => {
   try {
-    const apiKey = req.headers['x-api-key'];
-    if (!apiKey || apiKey !== process.env.TELEMETRY_API_KEY) {
+    // --- Timing-safe API key comparison ---
+    // A plain !== comparison leaks key length via timing side-channel.
+    // crypto.timingSafeEqual prevents that.
+    const apiKey     = req.headers['x-api-key'] || '';
+    const expectedKey = process.env.TELEMETRY_API_KEY || '';
+
+    let isValid = false;
+    try {
+      isValid =
+        apiKey.length > 0 &&
+        apiKey.length === expectedKey.length &&
+        crypto.timingSafeEqual(
+          Buffer.from(apiKey),
+          Buffer.from(expectedKey)
+        );
+    } catch {
+      isValid = false;
+    }
+
+    if (!isValid) {
       logger.warn(`Unauthorized /api/telemetry access from ${req.ip}`);
       return res.status(401).json({ error: 'Invalid API key' });
     }
 
-    const items = req.body.items || [];
+    // --- Validate payload ---
+    const items = req.body.items;
+
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Invalid or empty items array' });
     }
 
-    logger.info(`[/api/telemetry] Received ${items.length} telemetry items`);
+    if (items.length > MAX_BATCH_SIZE) {
+      return res.status(400).json({
+        error:    `Batch too large. Maximum is ${MAX_BATCH_SIZE} items per request`,
+        received: items.length,
+      });
+    }
+
+    logger.info(`[/api/telemetry] Received ${items.length} items from ${req.ip}`);
+
     const { inserted } = await insertTelemetryItems(items);
 
     res.json({ ok: true, inserted });
