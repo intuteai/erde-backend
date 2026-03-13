@@ -165,9 +165,11 @@ const LIVE_VALUES_COLUMNS = [
   "evcc1_dcac_chg_mode",            // $90
   "evcc1_evse_evcc_chg_finished",   // $91
   "evcc1_ac_max_current_value_a",   // $92
+  // PERIPHERALS
+  "hydraulic_oil_temp_c",           // $93
   // MUST BE LAST — jsonb columns
-  "cell_modules",                   // $93
-  "temp_modules",                   // $94
+  "cell_modules",                   // $94
+  "temp_modules",                   // $95
 ];
 
 /* =========================
@@ -338,9 +340,11 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.evcc1_dcac_chg_mode),              // $90
         toNum(live.evcc1_evse_evcc_chg_finished),     // $91
         toNum(live.evcc1_ac_max_current_value_a),     // $92
+        // PERIPHERALS
+        toNum(live.hydraulic_oil_temp_c),             // $93
         // MUST BE LAST — jsonb columns
-        toJsonb(live.cell_modules),                   // $93
-        toJsonb(live.temp_modules),                   // $94
+        toJsonb(live.cell_modules),                   // $94
+        toJsonb(live.temp_modules),                   // $95
       ];
 
       // Safety assert — if LIVE_VALUES_COLUMNS, values[], and SQL ever drift
@@ -392,6 +396,7 @@ const insertTelemetryItems = async (items = []) => {
             evcc1_evse_min_volt_v, evcc1_evse_min_curr_a, evcc1_evse_max_pwr_w,
             evcc1_lock_status, evcc1_lock_alarm, evcc1_dcac_chg_mode,
             evcc1_evse_evcc_chg_finished, evcc1_ac_max_current_value_a,
+            hydraulic_oil_temp_c,
             cell_modules, temp_modules
           )
           VALUES (
@@ -407,7 +412,8 @@ const insertTelemetryItems = async (items = []) => {
             $62,$63,$64,$65,$66,$67,$68,$69,$70,$71,$72,$73,$74,
             $75,$76,$77,$78,$79,$80,$81,$82,$83,$84,$85,$86,$87,
             $88,$89,$90,$91,$92,
-            $93::jsonb,$94::jsonb
+            $93,
+            $94::jsonb,$95::jsonb
           )
           `,
           values

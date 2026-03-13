@@ -41,13 +41,19 @@ async function buildTimeFilter(req, vehicleId) {
 }
 
 /* -------------------------------------------------------
-   CSV-safe IST timestamp formatting
+   CSV-safe IST timestamp formatting — matches toIST() in database-logs.js
 ------------------------------------------------------- */
 function formatRecordedAtForCSV(ts) {
-  return ts.toLocaleString('sv-SE', {
+  return ts.toLocaleString('en-IN', {
     timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
     hour12: false,
-  }).replace('T', ' ');
+  });
 }
 
 const CSV_SAFE_TIMESTAMP = (ts) => `"${formatRecordedAtForCSV(ts)}"`;
@@ -93,7 +99,7 @@ router.get(
       const { timeClause, params } = await buildTimeFilter(req, id);
 
       const column = type === 'cells' ? 'cell_modules' : 'temp_modules';
-      
+
       const countQuery = `
         SELECT COUNT(*) as total
         FROM live_values
@@ -219,8 +225,8 @@ router.get(
         }
       }
 
-      // Build headers
-      const headers = ['recorded_at'];
+      // Build headers — "Timestamp" matches ALL_COLUMN_DEFS label in database-logs.js
+      const headers = ['Timestamp'];
       for (let m = 1; m <= maxModules; m++) {
         for (let c = 1; c <= maxCells; c++) {
           headers.push(`M${m}_C${c}`);
@@ -250,7 +256,7 @@ router.get(
       let chunkCount = 1;
       while (true) {
         const { rows } = await client.query(`FETCH ${CHUNK_SIZE} FROM ${cursorName}`);
-        
+
         if (rows.length === 0) break;
 
         chunkCount++;
@@ -288,7 +294,7 @@ router.get(
 
     } catch (err) {
       logger.error(`Cell export failed (vehicle ${id}): ${err.message}`);
-      
+
       if (client) {
         try {
           await client.query('ROLLBACK');
@@ -415,8 +421,8 @@ router.get(
         }
       }
 
-      // Build headers
-      const headers = ['recorded_at'];
+      // Build headers — "Timestamp" matches ALL_COLUMN_DEFS label in database-logs.js
+      const headers = ['Timestamp'];
       for (let m = 1; m <= maxModules; m++) {
         for (let t = 1; t <= maxSensors; t++) {
           headers.push(`M${m}_T${t}`);
@@ -446,7 +452,7 @@ router.get(
       let chunkCount = 1;
       while (true) {
         const { rows } = await client.query(`FETCH ${CHUNK_SIZE} FROM ${cursorName}`);
-        
+
         if (rows.length === 0) break;
 
         chunkCount++;
@@ -484,7 +490,7 @@ router.get(
 
     } catch (err) {
       logger.error(`Temp export failed (vehicle ${id}): ${err.message}`);
-      
+
       if (client) {
         try {
           await client.query('ROLLBACK');

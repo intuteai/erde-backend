@@ -208,6 +208,9 @@ function formatLiveData(row) {
     compressor_output_voltage_v: toNumber(r.compressor_output_voltage_v),
     compressor_output_current_a: toNumber(r.compressor_output_current_a),
 
+    // Peripherals
+    hydraulic_oil_temp_c: toNumber(r.hydraulic_oil_temp_c),
+
     // EVCC1 — EV Charging Controller
     evcc1_pwr_stat:               toNumber(r.evcc1_pwr_stat),
     evcc1_socket_stat:            toNumber(r.evcc1_socket_stat),
