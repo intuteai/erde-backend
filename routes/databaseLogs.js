@@ -83,16 +83,16 @@ async function checkOwnership(vehicleId, user) {
 }
 
 function toIST(date) {
-  return date.toLocaleString('en-IN', {
-    timeZone: 'Asia/Kolkata',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
+  const ist = new Date(date.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const yyyy = ist.getFullYear();
+  const mm   = String(ist.getMonth() + 1).padStart(2, '0');
+  const dd   = String(ist.getDate()).padStart(2, '0');
+  let   hh   = ist.getHours();
+  const min  = String(ist.getMinutes()).padStart(2, '0');
+  const ss   = String(ist.getSeconds()).padStart(2, '0');
+  const ampm = hh >= 12 ? 'PM' : 'AM';
+  hh = hh % 12 || 12;
+  return `${dd}-${mm}-${yyyy} ${String(hh).padStart(2, '0')}:${min}:${ss} ${ampm}`;
 }
 
 /* ============================================================
@@ -106,7 +106,7 @@ const ALL_COLUMN_DEFS = [
   { key: 'battery_status',                 label: 'Battery Status' },
   { key: 'stack_voltage_v',                label: 'Stack Voltage (V)' },
   { key: 'battery_current_a',              label: 'Battery Current (A)' },
-  { key: 'output_power_kw',                label: 'Output Power (kW)',                computed: true },
+  { key: 'output_power_kw',                label: 'Battery Power (kW)',                computed: true },
   { key: 'charger_current_demand_a',       label: 'Charger Current Demand (A)' },
   { key: 'charger_voltage_demand_v',       label: 'Charger Voltage Demand (V)' },
   { key: 'max_voltage_v',                  label: 'Max Cell Voltage (V)' },
@@ -491,6 +491,9 @@ router.get(
             let val = row[key];
             if (key === 'recorded_at' && val instanceof Date) val = toIST(val);
             if (val === null || val === undefined) return '';
+            // Prefix timestamp with tab so Excel treats it as plain text
+            // and displays seconds + AM/PM without auto-reformatting
+            if (key === 'recorded_at') return `"\t${String(val).replace(/"/g, '""')}"`;
             return `"${String(val).replace(/"/g, '""')}"`;
           }).join(',')
         ).join('\n') + '\n';

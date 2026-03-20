@@ -41,22 +41,25 @@ async function buildTimeFilter(req, vehicleId) {
 }
 
 /* -------------------------------------------------------
-   CSV-safe IST timestamp formatting — matches toIST() in database-logs.js
+   IST timestamp — matches toIST() in database-logs.js
+   Tab prefix forces Excel to treat cell as plain text,
+   preserving seconds and AM/PM without auto-reformatting.
 ------------------------------------------------------- */
-function formatRecordedAtForCSV(ts) {
-  return ts.toLocaleString('en-IN', {
-    timeZone: 'Asia/Kolkata',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
+function toIST(date) {
+  const ist = new Date(date.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const yyyy = ist.getFullYear();
+  const mm   = String(ist.getMonth() + 1).padStart(2, '0');
+  const dd   = String(ist.getDate()).padStart(2, '0');
+  let   hh   = ist.getHours();
+  const min  = String(ist.getMinutes()).padStart(2, '0');
+  const ss   = String(ist.getSeconds()).padStart(2, '0');
+  const ampm = hh >= 12 ? 'PM' : 'AM';
+  hh = hh % 12 || 12;
+  return `${dd}-${mm}-${yyyy} ${String(hh).padStart(2, '0')}:${min}:${ss} ${ampm}`;
 }
 
-const CSV_SAFE_TIMESTAMP = (ts) => `"${formatRecordedAtForCSV(ts)}"`;
+// Tab-prefixed so Excel treats it as plain text
+const CSV_SAFE_TIMESTAMP = (ts) => `"\t${toIST(ts)}"`;
 
 /* -------------------------------------------------------
    GET ROW COUNT (for progress tracking)
@@ -225,7 +228,7 @@ router.get(
         }
       }
 
-      // Build headers — "Timestamp" matches ALL_COLUMN_DEFS label in database-logs.js
+      // Build headers
       const headers = ['Timestamp'];
       for (let m = 1; m <= maxModules; m++) {
         for (let c = 1; c <= maxCells; c++) {
@@ -261,7 +264,6 @@ router.get(
 
         chunkCount++;
 
-        // Convert rows to CSV
         const csvChunk = rows.map(r => {
           const row = new Array(headers.length).fill('');
           row[0] = CSV_SAFE_TIMESTAMP(r.recorded_at);
@@ -279,7 +281,6 @@ router.get(
         res.write(csvChunk);
         rowCount += rows.length;
 
-        // Log progress every 10 chunks (10k rows)
         if (chunkCount % 10 === 0) {
           const percentComplete = ((rowCount / totalRows) * 100).toFixed(1);
           logger.info(`Cell export progress: ${rowCount}/${totalRows} rows (${percentComplete}%) for vehicle ${id}`);
@@ -421,7 +422,7 @@ router.get(
         }
       }
 
-      // Build headers — "Timestamp" matches ALL_COLUMN_DEFS label in database-logs.js
+      // Build headers
       const headers = ['Timestamp'];
       for (let m = 1; m <= maxModules; m++) {
         for (let t = 1; t <= maxSensors; t++) {
@@ -457,7 +458,6 @@ router.get(
 
         chunkCount++;
 
-        // Convert rows to CSV
         const csvChunk = rows.map(r => {
           const row = new Array(headers.length).fill('');
           row[0] = CSV_SAFE_TIMESTAMP(r.recorded_at);
@@ -475,7 +475,6 @@ router.get(
         res.write(csvChunk);
         rowCount += rows.length;
 
-        // Log progress every 10 chunks (10k rows)
         if (chunkCount % 10 === 0) {
           const percentComplete = ((rowCount / totalRows) * 100).toFixed(1);
           logger.info(`Temp export progress: ${rowCount}/${totalRows} rows (${percentComplete}%) for vehicle ${id}`);
