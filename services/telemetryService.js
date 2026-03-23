@@ -62,11 +62,18 @@ const toTimestamp = (ts) => {
      (a) the values[] array below
      (b) the INSERT column list in the SQL
    The safety-check assert will catch any drift immediately.
+
+   NEW columns added (19 total):
+     $35–$38  : soh_percent, cycle_count, remaining_ah, charging_ah
+     $39–$45  : string_voltage_1_v … string_voltage_7_v
+     $46–$53  : string_temp_1_c … string_temp_8_c
+   All subsequent $N shifted accordingly.
+   cell_modules / temp_modules remain LAST (::jsonb cast).
 ========================= */
 const LIVE_VALUES_COLUMNS = [
   "vehicle_master_id",              // $1
   "recorded_at",                    // $2
-  // BATTERY
+  // BATTERY — core
   "soc_percent",                    // $3
   "stack_voltage_v",                // $4
   "battery_status",                 // $5
@@ -79,97 +86,119 @@ const LIVE_VALUES_COLUMNS = [
   "battery_current_a",              // $12
   "charger_current_demand_a",       // $13
   "charger_voltage_demand_v",       // $14
+  // BATTERY — NEW health & capacity
+  "soh_percent",                    // $15
+  "cycle_count",                    // $16
+  "remaining_ah",                   // $17
+  "charging_ah",                    // $18
+  // STRING VOLTAGES — NEW (7)
+  "string_voltage_1_v",             // $19
+  "string_voltage_2_v",             // $20
+  "string_voltage_3_v",             // $21
+  "string_voltage_4_v",             // $22
+  "string_voltage_5_v",             // $23
+  "string_voltage_6_v",             // $24
+  "string_voltage_7_v",             // $25
+  // STRING TEMPERATURES — NEW (8)
+  "string_temp_1_c",                // $26
+  "string_temp_2_c",                // $27
+  "string_temp_3_c",                // $28
+  "string_temp_4_c",                // $29
+  "string_temp_5_c",                // $30
+  "string_temp_6_c",                // $31
+  "string_temp_7_c",                // $32
+  "string_temp_8_c",                // $33
   // MOTOR / MCU
-  "motor_torque_limit",             // $15
-  "motor_torque_value",             // $16
-  "motor_speed_rpm",                // $17
-  "motor_rotation_dir",             // $18
-  "motor_operation_mode",           // $19
-  "mcu_enable_state",               // $20
-  "motor_ac_current_a",             // $21
-  "motor_ac_voltage_v",             // $22
-  "dc_side_voltage_v",              // $23
-  "motor_temp_c",                   // $24
-  "mcu_temp_c",                     // $25
-  "radiator_temp_c",                // $26
+  "motor_torque_limit",             // $34
+  "motor_torque_value",             // $35
+  "motor_speed_rpm",                // $36
+  "motor_rotation_dir",             // $37
+  "motor_operation_mode",           // $38
+  "mcu_enable_state",               // $39
+  "motor_ac_current_a",             // $40
+  "motor_ac_voltage_v",             // $41
+  "dc_side_voltage_v",              // $42
+  "motor_temp_c",                   // $43
+  "mcu_temp_c",                     // $44
+  "radiator_temp_c",                // $45
   // ODO / ENERGY
-  "total_running_hrs",              // $27
-  "last_trip_hrs",                  // $28
-  "total_kwh_consumed",             // $29
-  "last_trip_kwh",                  // $30
+  "total_running_hrs",              // $46
+  "last_trip_hrs",                  // $47
+  "total_kwh_consumed",             // $48
+  "last_trip_kwh",                  // $49
   // ALARMS
-  "alarms",                         // $31
+  "alarms",                         // $50
   // DCDC
-  "dcdc_pri_a_mosfet_temp_c",       // $32
-  "dcdc_sec_ls_mosfet_temp_c",      // $33
-  "dcdc_sec_hs_mosfet_temp_c",      // $34
-  "dcdc_pri_c_mosfet_temp_c",       // $35
-  "dcdc_input_voltage_v",           // $36
-  "dcdc_input_current_a",           // $37
-  "dcdc_output_voltage_v",          // $38
-  "dcdc_output_current_a",          // $39
-  "dcdc_max_temp_c",                // $40
-  "dcdc_occurence_count",           // $41
+  "dcdc_pri_a_mosfet_temp_c",       // $51
+  "dcdc_sec_ls_mosfet_temp_c",      // $52
+  "dcdc_sec_hs_mosfet_temp_c",      // $53
+  "dcdc_pri_c_mosfet_temp_c",       // $54
+  "dcdc_input_voltage_v",           // $55
+  "dcdc_input_current_a",           // $56
+  "dcdc_output_voltage_v",          // $57
+  "dcdc_output_current_a",          // $58
+  "dcdc_max_temp_c",                // $59
+  "dcdc_occurence_count",           // $60
   // BTMS / BMS THERMAL
-  "btms_command_mode",              // $42
-  "btms_hv_request",                // $43
-  "btms_charge_status",             // $44
-  "bms_hv_relay_state",             // $45  — bms_ prefix (distinct DB column)
-  "btms_target_temp_c",             // $46
-  "bms_pack_voltage_v",             // $47
-  "bms_life_counter",               // $48
-  "btms_command_crc",               // $49
-  "btms_status_mode",               // $50
-  "btms_hv_relay_state",            // $51  — btms_ prefix (distinct DB column)
-  "btms_inlet_temp_c",              // $52
-  "btms_outlet_temp_c",             // $53
-  "btms_demand_power_kw",           // $54
+  "btms_command_mode",              // $61
+  "btms_hv_request",                // $62
+  "btms_charge_status",             // $63
+  "bms_hv_relay_state",             // $64  — bms_ prefix (distinct DB column)
+  "btms_target_temp_c",             // $65
+  "bms_pack_voltage_v",             // $66
+  "bms_life_counter",               // $67
+  "btms_command_crc",               // $68
+  "btms_status_mode",               // $69
+  "btms_hv_relay_state",            // $70  — btms_ prefix (distinct DB column)
+  "btms_inlet_temp_c",              // $71
+  "btms_outlet_temp_c",             // $72
+  "btms_demand_power_kw",           // $73
   // MOTOR EXTRAS
-  "motor_status_word",              // $55  (varchar — app sends hex string)
-  "motor_freq_raw",                 // $56
-  "motor_total_wattage_w",          // $57
+  "motor_status_word",              // $74  (varchar — app sends hex string)
+  "motor_freq_raw",                 // $75
+  "motor_total_wattage_w",          // $76
   // AIR COMPRESSOR
-  "compressor_input_voltage_v",     // $58
-  "compressor_input_current_a",     // $59
-  "compressor_output_voltage_v",    // $60
-  "compressor_output_current_a",    // $61
+  "compressor_input_voltage_v",     // $77
+  "compressor_input_current_a",     // $78
+  "compressor_output_voltage_v",    // $79
+  "compressor_output_current_a",    // $80
   // EVCC1 — EV Charging Controller
-  "evcc1_pwr_stat",                 // $62
-  "evcc1_socket_stat",              // $63
-  "evcc1_evse_stat",                // $64
-  "evcc1_evse_chg_finished",        // $65
-  "evcc1_evse_processing",          // $66
-  "evcc1_evse_isol_stat",           // $67
-  "evcc1_evse_transfer_type",       // $68
-  "evcc1_evse_notification",        // $69
-  "evcc1_evse_pwr_delivery",        // $70
-  "evcc1_chg_finished",             // $71
-  "evcc1_cp_stat",                  // $72
-  "evcc1_s2_on_stat",               // $73
-  "evcc1_pd_stat",                  // $74
-  "evcc1_duty_value",               // $75
-  "evcc1_lock_stat",                // $76
-  "evcc1_aag_value",                // $77
-  "evcc1_error_code",               // $78
-  "evcc1_step_num",                 // $79
-  "evcc1_evse_max_delay_s",         // $80
-  "evcc1_evse_max_volt_v",          // $81
-  "evcc1_evse_max_curr_a",          // $82
-  "evcc1_evse_out_volt_v",          // $83
-  "evcc1_evse_out_curr_a",          // $84
-  "evcc1_evse_min_volt_v",          // $85
-  "evcc1_evse_min_curr_a",          // $86
-  "evcc1_evse_max_pwr_w",           // $87
-  "evcc1_lock_status",              // $88
-  "evcc1_lock_alarm",               // $89
-  "evcc1_dcac_chg_mode",            // $90
-  "evcc1_evse_evcc_chg_finished",   // $91
-  "evcc1_ac_max_current_value_a",   // $92
+  "evcc1_pwr_stat",                 // $81
+  "evcc1_socket_stat",              // $82
+  "evcc1_evse_stat",                // $83
+  "evcc1_evse_chg_finished",        // $84
+  "evcc1_evse_processing",          // $85
+  "evcc1_evse_isol_stat",           // $86
+  "evcc1_evse_transfer_type",       // $87
+  "evcc1_evse_notification",        // $88
+  "evcc1_evse_pwr_delivery",        // $89
+  "evcc1_chg_finished",             // $90
+  "evcc1_cp_stat",                  // $91
+  "evcc1_s2_on_stat",               // $92
+  "evcc1_pd_stat",                  // $93
+  "evcc1_duty_value",               // $94
+  "evcc1_lock_stat",                // $95
+  "evcc1_aag_value",                // $96
+  "evcc1_error_code",               // $97
+  "evcc1_step_num",                 // $98
+  "evcc1_evse_max_delay_s",         // $99
+  "evcc1_evse_max_volt_v",          // $100
+  "evcc1_evse_max_curr_a",          // $101
+  "evcc1_evse_out_volt_v",          // $102
+  "evcc1_evse_out_curr_a",          // $103
+  "evcc1_evse_min_volt_v",          // $104
+  "evcc1_evse_min_curr_a",          // $105
+  "evcc1_evse_max_pwr_w",           // $106
+  "evcc1_lock_status",              // $107
+  "evcc1_lock_alarm",               // $108
+  "evcc1_dcac_chg_mode",            // $109
+  "evcc1_evse_evcc_chg_finished",   // $110
+  "evcc1_ac_max_current_value_a",   // $111
   // PERIPHERALS
-  "hydraulic_oil_temp_c",           // $93
+  "hydraulic_oil_temp_c",           // $112
   // MUST BE LAST — jsonb columns
-  "cell_modules",                   // $94
-  "temp_modules",                   // $95
+  "cell_modules",                   // $113
+  "temp_modules",                   // $114
 ];
 
 /* =========================
@@ -241,7 +270,7 @@ const insertTelemetryItems = async (items = []) => {
       const values = [
         vehicleMasterId,                              // $1
         ts,                                           // $2
-        // BATTERY
+        // BATTERY — core
         toNum(live.soc_percent),                      // $3
         toNum(live.stack_voltage_v),                  // $4
         toText(live.battery_status),                  // $5
@@ -254,97 +283,119 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.battery_current_a),                // $12
         toNum(live.charger_current_demand_a),         // $13
         toNum(live.charger_voltage_demand_v),         // $14
+        // BATTERY — NEW health & capacity
+        toNum(live.soh_percent),                      // $15
+        live.cycle_count ?? null,                     // $16
+        toNum(live.remaining_ah),                     // $17
+        toNum(live.charging_ah),                      // $18
+        // STRING VOLTAGES — NEW (7)
+        toNum(live.string_voltage_1_v),               // $19
+        toNum(live.string_voltage_2_v),               // $20
+        toNum(live.string_voltage_3_v),               // $21
+        toNum(live.string_voltage_4_v),               // $22
+        toNum(live.string_voltage_5_v),               // $23
+        toNum(live.string_voltage_6_v),               // $24
+        toNum(live.string_voltage_7_v),               // $25
+        // STRING TEMPERATURES — NEW (8)
+        toNum(live.string_temp_1_c),                  // $26
+        toNum(live.string_temp_2_c),                  // $27
+        toNum(live.string_temp_3_c),                  // $28
+        toNum(live.string_temp_4_c),                  // $29
+        toNum(live.string_temp_5_c),                  // $30
+        toNum(live.string_temp_6_c),                  // $31
+        toNum(live.string_temp_7_c),                  // $32
+        toNum(live.string_temp_8_c),                  // $33
         // MOTOR / MCU
-        toNum(live.motor_torque_limit),               // $15
-        toNum(live.motor_torque_value),               // $16
-        live.motor_speed_rpm ?? null,                 // $17
-        toText(live.motor_rotation_dir),              // $18
-        toText(live.motor_operation_mode),            // $19
-        toText(live.mcu_enable_state),                // $20
-        toNum(live.motor_ac_current_a),               // $21
-        toNum(live.motor_ac_voltage_v),               // $22
-        toNum(live.dc_side_voltage_v),                // $23
-        toNum(live.motor_temp_c),                     // $24
-        toNum(live.mcu_temp_c),                       // $25
-        toNum(live.radiator_temp_c),                  // $26
+        toNum(live.motor_torque_limit),               // $34
+        toNum(live.motor_torque_value),               // $35
+        live.motor_speed_rpm ?? null,                 // $36
+        toText(live.motor_rotation_dir),              // $37
+        toText(live.motor_operation_mode),            // $38
+        toText(live.mcu_enable_state),                // $39
+        toNum(live.motor_ac_current_a),               // $40
+        toNum(live.motor_ac_voltage_v),               // $41
+        toNum(live.dc_side_voltage_v),                // $42
+        toNum(live.motor_temp_c),                     // $43
+        toNum(live.mcu_temp_c),                       // $44
+        toNum(live.radiator_temp_c),                  // $45
         // ODO / ENERGY
-        toInterval(live.total_running_hrs),           // $27
-        toInterval(live.last_trip_hrs),               // $28
-        toNum(live.total_kwh_consumed),               // $29
-        toNum(live.last_trip_kwh),                    // $30
+        toInterval(live.total_running_hrs),           // $46
+        toInterval(live.last_trip_hrs),               // $47
+        toNum(live.total_kwh_consumed),               // $48
+        toNum(live.last_trip_kwh),                    // $49
         // ALARMS
-        live.alarms ? JSON.stringify(live.alarms) : JSON.stringify({}), // $31
+        live.alarms ? JSON.stringify(live.alarms) : JSON.stringify({}), // $50
         // DCDC
-        toNum(live.dcdc_pri_a_mosfet_temp_c),         // $32
-        toNum(live.dcdc_sec_ls_mosfet_temp_c),        // $33
-        toNum(live.dcdc_sec_hs_mosfet_temp_c),        // $34
-        toNum(live.dcdc_pri_c_mosfet_temp_c),         // $35
-        toNum(live.dcdc_input_voltage_v),             // $36
-        toNum(live.dcdc_input_current_a),             // $37
-        toNum(live.dcdc_output_voltage_v),            // $38
-        toNum(live.dcdc_output_current_a),            // $39
-        toNum(live.dcdc_max_temp_c),                  // $40
-        live.dcdc_occurence_count ?? null,            // $41
+        toNum(live.dcdc_pri_a_mosfet_temp_c),         // $51
+        toNum(live.dcdc_sec_ls_mosfet_temp_c),        // $52
+        toNum(live.dcdc_sec_hs_mosfet_temp_c),        // $53
+        toNum(live.dcdc_pri_c_mosfet_temp_c),         // $54
+        toNum(live.dcdc_input_voltage_v),             // $55
+        toNum(live.dcdc_input_current_a),             // $56
+        toNum(live.dcdc_output_voltage_v),            // $57
+        toNum(live.dcdc_output_current_a),            // $58
+        toNum(live.dcdc_max_temp_c),                  // $59
+        live.dcdc_occurence_count ?? null,            // $60
         // BTMS / BMS THERMAL
-        toNum(live.btms_command_mode),                // $42
-        toNum(live.btms_hv_request),                  // $43
-        toNum(live.btms_charge_status),               // $44
-        toNum(live.bms_hv_relay_state),               // $45  — bms_ column
-        toNum(live.btms_target_temp_c),               // $46
-        toNum(live.bms_pack_voltage_v),               // $47
-        toNum(live.bms_life_counter),                 // $48
-        toNum(live.btms_command_crc),                 // $49
-        toNum(live.btms_status_mode),                 // $50
-        toNum(live.btms_hv_relay_state),              // $51  — btms_ column
-        toNum(live.btms_inlet_temp_c),                // $52
-        toNum(live.btms_outlet_temp_c),               // $53
-        toNum(live.btms_demand_power_kw),             // $54
+        toNum(live.btms_command_mode),                // $61
+        toNum(live.btms_hv_request),                  // $62
+        toNum(live.btms_charge_status),               // $63
+        toNum(live.bms_hv_relay_state),               // $64  — bms_ column
+        toNum(live.btms_target_temp_c),               // $65
+        toNum(live.bms_pack_voltage_v),               // $66
+        toNum(live.bms_life_counter),                 // $67
+        toNum(live.btms_command_crc),                 // $68
+        toNum(live.btms_status_mode),                 // $69
+        toNum(live.btms_hv_relay_state),              // $70  — btms_ column
+        toNum(live.btms_inlet_temp_c),                // $71
+        toNum(live.btms_outlet_temp_c),               // $72
+        toNum(live.btms_demand_power_kw),             // $73
         // MOTOR EXTRAS
-        toText(live.motor_status_word),               // $55
-        toNum(live.motor_freq_raw),                   // $56
-        toNum(live.motor_total_wattage_w),            // $57
+        toText(live.motor_status_word),               // $74
+        toNum(live.motor_freq_raw),                   // $75
+        toNum(live.motor_total_wattage_w),            // $76
         // AIR COMPRESSOR
-        toNum(live.compressor_input_voltage_v),       // $58
-        toNum(live.compressor_input_current_a),       // $59
-        toNum(live.compressor_output_voltage_v),      // $60
-        toNum(live.compressor_output_current_a),      // $61
+        toNum(live.compressor_input_voltage_v),       // $77
+        toNum(live.compressor_input_current_a),       // $78
+        toNum(live.compressor_output_voltage_v),      // $79
+        toNum(live.compressor_output_current_a),      // $80
         // EVCC1 — EV Charging Controller
-        toNum(live.evcc1_pwr_stat),                   // $62
-        toNum(live.evcc1_socket_stat),                // $63
-        toNum(live.evcc1_evse_stat),                  // $64
-        toNum(live.evcc1_evse_chg_finished),          // $65
-        toNum(live.evcc1_evse_processing),            // $66
-        toNum(live.evcc1_evse_isol_stat),             // $67
-        toNum(live.evcc1_evse_transfer_type),         // $68
-        toNum(live.evcc1_evse_notification),          // $69
-        toNum(live.evcc1_evse_pwr_delivery),          // $70
-        toNum(live.evcc1_chg_finished),               // $71
-        toNum(live.evcc1_cp_stat),                    // $72
-        toNum(live.evcc1_s2_on_stat),                 // $73
-        toNum(live.evcc1_pd_stat),                    // $74
-        toNum(live.evcc1_duty_value),                 // $75
-        toNum(live.evcc1_lock_stat),                  // $76
-        toNum(live.evcc1_aag_value),                  // $77
-        toNum(live.evcc1_error_code),                 // $78
-        toNum(live.evcc1_step_num),                   // $79
-        toNum(live.evcc1_evse_max_delay_s),           // $80
-        toNum(live.evcc1_evse_max_volt_v),            // $81
-        toNum(live.evcc1_evse_max_curr_a),            // $82
-        toNum(live.evcc1_evse_out_volt_v),            // $83
-        toNum(live.evcc1_evse_out_curr_a),            // $84
-        toNum(live.evcc1_evse_min_volt_v),            // $85
-        toNum(live.evcc1_evse_min_curr_a),            // $86
-        toNum(live.evcc1_evse_max_pwr_w),             // $87
-        toNum(live.evcc1_lock_status),                // $88
-        toNum(live.evcc1_lock_alarm),                 // $89
-        toNum(live.evcc1_dcac_chg_mode),              // $90
-        toNum(live.evcc1_evse_evcc_chg_finished),     // $91
-        toNum(live.evcc1_ac_max_current_value_a),     // $92
+        toNum(live.evcc1_pwr_stat),                   // $81
+        toNum(live.evcc1_socket_stat),                // $82
+        toNum(live.evcc1_evse_stat),                  // $83
+        toNum(live.evcc1_evse_chg_finished),          // $84
+        toNum(live.evcc1_evse_processing),            // $85
+        toNum(live.evcc1_evse_isol_stat),             // $86
+        toNum(live.evcc1_evse_transfer_type),         // $87
+        toNum(live.evcc1_evse_notification),          // $88
+        toNum(live.evcc1_evse_pwr_delivery),          // $89
+        toNum(live.evcc1_chg_finished),               // $90
+        toNum(live.evcc1_cp_stat),                    // $91
+        toNum(live.evcc1_s2_on_stat),                 // $92
+        toNum(live.evcc1_pd_stat),                    // $93
+        toNum(live.evcc1_duty_value),                 // $94
+        toNum(live.evcc1_lock_stat),                  // $95
+        toNum(live.evcc1_aag_value),                  // $96
+        toNum(live.evcc1_error_code),                 // $97
+        toNum(live.evcc1_step_num),                   // $98
+        toNum(live.evcc1_evse_max_delay_s),           // $99
+        toNum(live.evcc1_evse_max_volt_v),            // $100
+        toNum(live.evcc1_evse_max_curr_a),            // $101
+        toNum(live.evcc1_evse_out_volt_v),            // $102
+        toNum(live.evcc1_evse_out_curr_a),            // $103
+        toNum(live.evcc1_evse_min_volt_v),            // $104
+        toNum(live.evcc1_evse_min_curr_a),            // $105
+        toNum(live.evcc1_evse_max_pwr_w),             // $106
+        toNum(live.evcc1_lock_status),                // $107
+        toNum(live.evcc1_lock_alarm),                 // $108
+        toNum(live.evcc1_dcac_chg_mode),              // $109
+        toNum(live.evcc1_evse_evcc_chg_finished),     // $110
+        toNum(live.evcc1_ac_max_current_value_a),     // $111
         // PERIPHERALS
-        toNum(live.hydraulic_oil_temp_c),             // $93
+        toNum(live.hydraulic_oil_temp_c),             // $112
         // MUST BE LAST — jsonb columns
-        toJsonb(live.cell_modules),                   // $94
-        toJsonb(live.temp_modules),                   // $95
+        toJsonb(live.cell_modules),                   // $113
+        toJsonb(live.temp_modules),                   // $114
       ];
 
       // Safety assert — if LIVE_VALUES_COLUMNS, values[], and SQL ever drift
@@ -365,6 +416,13 @@ const insertTelemetryItems = async (items = []) => {
             max_temp_c, min_temp_c, avg_temp_c,
             battery_current_a,
             charger_current_demand_a, charger_voltage_demand_v,
+            soh_percent, cycle_count, remaining_ah, charging_ah,
+            string_voltage_1_v, string_voltage_2_v, string_voltage_3_v,
+            string_voltage_4_v, string_voltage_5_v, string_voltage_6_v,
+            string_voltage_7_v,
+            string_temp_1_c, string_temp_2_c, string_temp_3_c,
+            string_temp_4_c, string_temp_5_c, string_temp_6_c,
+            string_temp_7_c, string_temp_8_c,
             motor_torque_limit, motor_torque_value, motor_speed_rpm,
             motor_rotation_dir, motor_operation_mode, mcu_enable_state,
             motor_ac_current_a, motor_ac_voltage_v, dc_side_voltage_v,
@@ -402,18 +460,21 @@ const insertTelemetryItems = async (items = []) => {
           VALUES (
             $1, to_timestamp($2 / 1000.0),
             $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-            $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,
-            $27,$28,$29,$30,
-            $31,
-            $32,$33,$34,$35,$36,$37,$38,$39,$40,$41,
-            $42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,
-            $55,$56,$57,
-            $58,$59,$60,$61,
-            $62,$63,$64,$65,$66,$67,$68,$69,$70,$71,$72,$73,$74,
-            $75,$76,$77,$78,$79,$80,$81,$82,$83,$84,$85,$86,$87,
-            $88,$89,$90,$91,$92,
-            $93,
-            $94::jsonb,$95::jsonb
+            $15,$16,$17,$18,
+            $19,$20,$21,$22,$23,$24,$25,
+            $26,$27,$28,$29,$30,$31,$32,$33,
+            $34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,
+            $46,$47,$48,$49,
+            $50,
+            $51,$52,$53,$54,$55,$56,$57,$58,$59,$60,
+            $61,$62,$63,$64,$65,$66,$67,$68,$69,$70,$71,$72,$73,
+            $74,$75,$76,
+            $77,$78,$79,$80,
+            $81,$82,$83,$84,$85,$86,$87,$88,$89,$90,$91,$92,$93,
+            $94,$95,$96,$97,$98,$99,$100,$101,$102,$103,$104,$105,$106,
+            $107,$108,$109,$110,$111,
+            $112,
+            $113::jsonb,$114::jsonb
           )
           `,
           values

@@ -44,6 +44,80 @@ const computeStats = (values) => {
   return { min, max, avg };
 };
 
+// ────────────────────────────────────────────────
+// String voltage stats (7 strings)
+// Same ±0.1 / ±0.05 deviation logic as cell outliers.
+// ────────────────────────────────────────────────
+const computeStringVoltageStats = (rawValues) => {
+  const numeric = rawValues.map(toNumber);
+  const valid   = numeric.filter((v) => v != null);
+  const pack    = computeStats(valid);
+
+  const string_voltage_stats = numeric.map((v, i) => {
+    let status  = null;
+    let delta_v = null;
+
+    if (v != null && pack.avg != null) {
+      delta_v = v - pack.avg;
+      if      (delta_v >  0.1)  status = "CRITICAL_HIGH";
+      else if (delta_v >  0.05) status = "HIGH";
+      else if (delta_v < -0.1)  status = "CRITICAL_LOW";
+      else if (delta_v < -0.05) status = "LOW";
+      else                       status = "OK";
+    }
+
+    return {
+      string:  i + 1,
+      value_v: v,
+      delta_v: delta_v != null ? Math.round(delta_v * 1000) / 1000 : null,
+      status,
+    };
+  });
+
+  const outliers = valid.filter(
+    (v) => pack.avg != null && Math.abs(v - pack.avg) > 0.1
+  ).length;
+
+  return {
+    string_voltage_stats,
+    string_voltage_pack: {
+      min_v:    pack.min,
+      max_v:    pack.max,
+      avg_v:    pack.avg,
+      outliers,
+    },
+  };
+};
+
+// ────────────────────────────────────────────────
+// String temperature stats (8 strings)
+// Same OK/WARN/CRITICAL thresholds as temp_module_stats.
+// ────────────────────────────────────────────────
+const computeStringTempStats = (rawValues) => {
+  const numeric = rawValues.map(toNumber);
+  const valid   = numeric.filter((v) => v != null);
+  const pack    = computeStats(valid);
+
+  const string_temp_stats = numeric.map((v, i) => {
+    let status = null;
+    if (v != null) {
+      if      (v <= 45) status = "OK";
+      else if (v <= 55) status = "WARN";
+      else              status = "CRITICAL";
+    }
+    return { string: i + 1, value_c: v, status };
+  });
+
+  return {
+    string_temp_stats,
+    string_temp_pack: {
+      min_c: pack.min,
+      max_c: pack.max,
+      avg_c: pack.avg,
+    },
+  };
+};
+
 function formatLiveData(row) {
   if (!row) return {};
 
@@ -66,9 +140,9 @@ function formatLiveData(row) {
           .length;
 
   const cell_pack_stats = {
-    min_v: cellPackStatsBase.min,
-    max_v: cellPackStatsBase.max,
-    avg_v: cellPackStatsBase.avg,
+    min_v:    cellPackStatsBase.min,
+    max_v:    cellPackStatsBase.max,
+    avg_v:    cellPackStatsBase.avg,
     outliers: cellOutliers,
   };
 
@@ -79,9 +153,9 @@ function formatLiveData(row) {
     const stats = computeStats(values);
     return {
       module: idx + 1,
-      min_v: stats.min,
-      max_v: stats.max,
-      avg_v: stats.avg,
+      min_v:  stats.min,
+      max_v:  stats.max,
+      avg_v:  stats.avg,
     };
   });
 
@@ -105,19 +179,37 @@ function formatLiveData(row) {
 
     let status = null;
     if (stats.max != null) {
-      if (stats.max <= 45) status = "OK";
+      if (stats.max <= 45)      status = "OK";
       else if (stats.max <= 55) status = "WARN";
-      else status = "CRITICAL";
+      else                       status = "CRITICAL";
     }
 
     return {
       module: idx + 1,
-      min_c: stats.min,
-      max_c: stats.max,
-      avg_c: stats.avg,
+      min_c:  stats.min,
+      max_c:  stats.max,
+      avg_c:  stats.avg,
       status,
     };
   });
+
+  // ────────────────────────────────────────────────
+  // String voltage stats (7 strings)
+  // ────────────────────────────────────────────────
+  const { string_voltage_stats, string_voltage_pack } = computeStringVoltageStats([
+    r.string_voltage_1_v, r.string_voltage_2_v, r.string_voltage_3_v,
+    r.string_voltage_4_v, r.string_voltage_5_v, r.string_voltage_6_v,
+    r.string_voltage_7_v,
+  ]);
+
+  // ────────────────────────────────────────────────
+  // String temperature stats (8 strings)
+  // ────────────────────────────────────────────────
+  const { string_temp_stats, string_temp_pack } = computeStringTempStats([
+    r.string_temp_1_c, r.string_temp_2_c, r.string_temp_3_c,
+    r.string_temp_4_c, r.string_temp_5_c, r.string_temp_6_c,
+    r.string_temp_7_c, r.string_temp_8_c,
+  ]);
 
   // ────────────────────────────────────────────────
   // Final output shape
@@ -125,86 +217,99 @@ function formatLiveData(row) {
   const data = {
     recorded_at: r.recorded_at ? r.recorded_at.toISOString() : null,
 
-    soc_percent: toNumber(r.soc_percent),
-    battery_status: r.battery_status ?? null,
-    stack_voltage_v: toNumber(r.stack_voltage_v),
-    dc_current_a: toNumber(r.battery_current_a),
-    charging_current_a: toNumber(r.charger_current_demand_a),
+    // Battery core
+    soc_percent:              toNumber(r.soc_percent),
+    battery_status:           r.battery_status ?? null,
+    stack_voltage_v:          toNumber(r.stack_voltage_v),
+    dc_current_a:             toNumber(r.battery_current_a),
+    charging_current_a:       toNumber(r.charger_current_demand_a),
     charger_voltage_demand_v: toNumber(r.charger_voltage_demand_v),
 
-    // Pack-level legacy min/max/avg (BMS-reported — DO NOT TOUCH THESE)
+    // NEW — Battery health & capacity
+    soh_percent:  toNumber(r.soh_percent),
+    cycle_count:  r.cycle_count != null ? Number(r.cycle_count) : null,
+    remaining_ah: toNumber(r.remaining_ah),
+    charging_ah:  toNumber(r.charging_ah),
+
+    // Pack-level BMS-reported min/max/avg (DO NOT TOUCH — come directly from BMS)
     max_voltage_v: toNumber(r.max_voltage_v),
     min_voltage_v: toNumber(r.min_voltage_v),
     avg_voltage_v: toNumber(r.avg_voltage_v),
-    max_temp_c: toNumber(r.max_temp_c),
-    min_temp_c: toNumber(r.min_temp_c),
-    avg_temp_c: toNumber(r.avg_temp_c),
+    max_temp_c:    toNumber(r.max_temp_c),
+    min_temp_c:    toNumber(r.min_temp_c),
+    avg_temp_c:    toNumber(r.avg_temp_c),
 
     // Cell / temp module arrays + computed stats
-    temp_modules: tempModules,
-    cell_modules: cellModules,
-
+    temp_modules:      tempModules,
+    cell_modules:      cellModules,
     temp_pack_stats,
     temp_module_stats,
     cell_pack_stats,
     cell_module_stats,
 
-    // Motor / MCU
-    motor_torque_nm: toNumber(r.motor_torque_value),
-    motor_torque_limit: toNumber(r.motor_torque_limit),
-    motor_operation_mode: r.motor_operation_mode ?? null,
-    motor_speed_rpm: toNumber(r.motor_speed_rpm),
-    motor_rotation_dir: r.motor_rotation_dir ?? null,
-    ac_current_a: toNumber(r.motor_ac_current_a),
-    motor_ac_voltage_v: toNumber(r.motor_ac_voltage_v),
-    dc_side_voltage_v: toNumber(r.dc_side_voltage_v),
-    mcu_enable_state: r.mcu_enable_state?.trim() || null,
-    motor_temp_c: toNumber(r.motor_temp_c),
-    mcu_temp_c: toNumber(r.mcu_temp_c),
-    radiator_temp_c: toNumber(r.radiator_temp_c),
+    // NEW — String voltage arrays + computed stats
+    string_voltage_stats,
+    string_voltage_pack,
 
-    // motor_status_word is stored as varchar hex string in DB (e.g. "0x001A")
-    // passed through as-is — no conversion needed
-    motor_status_word: r.motor_status_word ?? null,
-    motor_freq_raw: toNumber(r.motor_freq_raw),
+    // NEW — String temp arrays + computed stats
+    string_temp_stats,
+    string_temp_pack,
+
+    // Motor / MCU
+    motor_torque_nm:       toNumber(r.motor_torque_value),
+    motor_torque_limit:    toNumber(r.motor_torque_limit),
+    motor_operation_mode:  r.motor_operation_mode ?? null,
+    motor_speed_rpm:       toNumber(r.motor_speed_rpm),
+    motor_rotation_dir:    r.motor_rotation_dir ?? null,
+    ac_current_a:          toNumber(r.motor_ac_current_a),
+    motor_ac_voltage_v:    toNumber(r.motor_ac_voltage_v),
+    dc_side_voltage_v:     toNumber(r.dc_side_voltage_v),
+    mcu_enable_state:      r.mcu_enable_state?.trim() || null,
+    motor_temp_c:          toNumber(r.motor_temp_c),
+    mcu_temp_c:            toNumber(r.mcu_temp_c),
+    radiator_temp_c:       toNumber(r.radiator_temp_c),
+
+    // motor_status_word stored as varchar hex string (e.g. "0x001A") — pass through as-is
+    motor_status_word:     r.motor_status_word ?? null,
+    motor_freq_raw:        toNumber(r.motor_freq_raw),
     motor_total_wattage_w: toNumber(r.motor_total_wattage_w),
 
     // ODO / Trip
-    total_hours: intervalToHours(r.total_running_hrs),
+    total_hours:   intervalToHours(r.total_running_hrs),
     last_trip_hrs: intervalToHours(r.last_trip_hrs),
-    total_kwh: toNumber(r.total_kwh_consumed),
+    total_kwh:     toNumber(r.total_kwh_consumed),
     last_trip_kwh: toNumber(r.last_trip_kwh),
 
     // DC-DC Converter
-    dcdc_input_voltage_v: toNumber(r.dcdc_input_voltage_v),
-    dcdc_input_current_a: toNumber(r.dcdc_input_current_a),
-    dcdc_output_voltage_v: toNumber(r.dcdc_output_voltage_v),
-    dcdc_output_current_a: toNumber(r.dcdc_output_current_a),
-    dcdc_max_temp_c: toNumber(r.dcdc_max_temp_c),
-    dcdc_pri_a_mosfet_temp_c: toNumber(r.dcdc_pri_a_mosfet_temp_c),
-    dcdc_pri_c_mosfet_temp_c: toNumber(r.dcdc_pri_c_mosfet_temp_c),
+    dcdc_input_voltage_v:      toNumber(r.dcdc_input_voltage_v),
+    dcdc_input_current_a:      toNumber(r.dcdc_input_current_a),
+    dcdc_output_voltage_v:     toNumber(r.dcdc_output_voltage_v),
+    dcdc_output_current_a:     toNumber(r.dcdc_output_current_a),
+    dcdc_max_temp_c:           toNumber(r.dcdc_max_temp_c),
+    dcdc_pri_a_mosfet_temp_c:  toNumber(r.dcdc_pri_a_mosfet_temp_c),
+    dcdc_pri_c_mosfet_temp_c:  toNumber(r.dcdc_pri_c_mosfet_temp_c),
     dcdc_sec_ls_mosfet_temp_c: toNumber(r.dcdc_sec_ls_mosfet_temp_c),
     dcdc_sec_hs_mosfet_temp_c: toNumber(r.dcdc_sec_hs_mosfet_temp_c),
-    dcdc_occurrence_count: toNumber(r.dcdc_occurence_count),
+    dcdc_occurrence_count:     toNumber(r.dcdc_occurence_count),
 
     // BTMS
-    btms_command_mode: toNumber(r.btms_command_mode),
-    btms_hv_request: toNumber(r.btms_hv_request),
-    btms_charge_status: toNumber(r.btms_charge_status),
-    bms_hv_relay_state: toNumber(r.bms_hv_relay_state),
-    btms_target_temp_c: toNumber(r.btms_target_temp_c),
-    bms_pack_voltage_v: toNumber(r.bms_pack_voltage_v),
-    bms_life_counter: toNumber(r.bms_life_counter),
-    btms_command_crc: toNumber(r.btms_command_crc),
-    btms_status_mode: toNumber(r.btms_status_mode),
-    btms_hv_relay_state: toNumber(r.btms_hv_relay_state),
-    btms_inlet_temp_c: toNumber(r.btms_inlet_temp_c),
-    btms_outlet_temp_c: toNumber(r.btms_outlet_temp_c),
+    btms_command_mode:    toNumber(r.btms_command_mode),
+    btms_hv_request:      toNumber(r.btms_hv_request),
+    btms_charge_status:   toNumber(r.btms_charge_status),
+    bms_hv_relay_state:   toNumber(r.bms_hv_relay_state),
+    btms_target_temp_c:   toNumber(r.btms_target_temp_c),
+    bms_pack_voltage_v:   toNumber(r.bms_pack_voltage_v),
+    bms_life_counter:     toNumber(r.bms_life_counter),
+    btms_command_crc:     toNumber(r.btms_command_crc),
+    btms_status_mode:     toNumber(r.btms_status_mode),
+    btms_hv_relay_state:  toNumber(r.btms_hv_relay_state),
+    btms_inlet_temp_c:    toNumber(r.btms_inlet_temp_c),
+    btms_outlet_temp_c:   toNumber(r.btms_outlet_temp_c),
     btms_demand_power_kw: toNumber(r.btms_demand_power_kw),
 
     // Air Compressor
-    compressor_input_voltage_v: toNumber(r.compressor_input_voltage_v),
-    compressor_input_current_a: toNumber(r.compressor_input_current_a),
+    compressor_input_voltage_v:  toNumber(r.compressor_input_voltage_v),
+    compressor_input_current_a:  toNumber(r.compressor_input_current_a),
     compressor_output_voltage_v: toNumber(r.compressor_output_voltage_v),
     compressor_output_current_a: toNumber(r.compressor_output_current_a),
 
