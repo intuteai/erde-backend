@@ -235,7 +235,7 @@ router.get(
       );
 
       // 4. Compute deltas per vehicle
-      const intervalToHours = (interval) => {
+      const intervalToHoursLocal = (interval) => {
         if (!interval) return 0;
         const { days = 0, hours = 0, minutes = 0, seconds = 0 } = interval;
         return days * 24 + hours + minutes / 60 + seconds / 3600;
@@ -244,8 +244,8 @@ router.get(
       const map = {};
 
       for (const row of rangeRes.rows) {
-        const firstHours   = intervalToHours(row.first_running_hrs);
-        const lastHours    = intervalToHours(row.last_running_hrs);
+        const firstHours   = intervalToHoursLocal(row.first_running_hrs);
+        const lastHours    = intervalToHoursLocal(row.last_running_hrs);
         const runningHours = Number(Math.max(0, lastHours - firstHours).toFixed(2));
 
         const firstKwh = row.first_kwh !== null ? Number(row.first_kwh) : null;
@@ -641,6 +641,166 @@ router.get(
       });
     } catch (err) {
       logger.error(`GET /vehicles/${id}/analytics error: ${err.message}`);
+      res.status(500).json({ error: 'Server error' });
+    }
+  }
+);
+
+/* ============================================================
+   GET /api/vehicles/:id/activity?date=YYYY-MM-DD
+
+   Returns 15-minute bucketed activity data for a single day.
+   Used by the ActivityTimeline component in LiveCharts.jsx.
+
+   Each bucket contains:
+     - bucket:    ISO timestamp of the 15-min slot start (IST)
+     - hrs_start: EPOCH seconds of total_running_hrs at bucket start
+     - hrs_end:   EPOCH seconds of total_running_hrs at bucket end
+     - row_count: number of telemetry rows in this bucket
+
+   Frontend derives state per bucket:
+     - hrs_end > hrs_start  → RUNNING  (odometer moved)
+     - hrs_end === hrs_start → IDLE    (ECU on, odometer frozen)
+     - bucket missing        → OFFLINE (no data = vehicle off)
+
+   Summary stats (running_hours, idle_hours, sessions) are
+   computed server-side and returned alongside the buckets.
+
+   All times interpreted in IST (Asia/Kolkata, UTC+5:30).
+   Uses existing idx_live index — no new index needed.
+   Returns max 96 rows (96 × 15 min = 24 hours).
+============================================================ */
+router.get(
+  '/:id/activity',
+  authenticateToken,
+  generalLimiter,
+  checkPermission('live_view', 'read'),
+  async (req, res) => {
+    const id = parseVehicleId(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid vehicle ID' });
+
+    const { date } = req.query;
+
+    // Validate date param — must be YYYY-MM-DD
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date param required (YYYY-MM-DD)' });
+    }
+
+    // Reject future dates
+    const todayIST = new Date().toLocaleDateString('en-CA', {
+      timeZone: 'Asia/Kolkata',
+    });
+    if (date > todayIST) {
+      return res.status(400).json({ error: 'date cannot be in the future' });
+    }
+
+    const isCustomer = req.user.role === 'customer';
+
+    try {
+      // 1. Ownership check
+      const allowed = await checkVehicleAccess(id, req.user.user_id, isCustomer);
+      if (!allowed) return res.status(403).json({ error: 'Access denied' });
+
+      // 2. Build IST day boundaries
+      //    e.g. date=2026-04-14
+      //      → startTime = 2026-04-14T00:00:00+05:30
+      //      → endTime   = 2026-04-14T23:59:59.999+05:30
+      const startTime = new Date(`${date}T00:00:00+05:30`);
+      const endTime   = new Date(`${date}T23:59:59.999+05:30`);
+
+      if (isNaN(startTime.getTime())) {
+        return res.status(400).json({ error: 'Invalid date format' });
+      }
+
+      // 3. Bucket into 15-minute IST-aligned slots in Postgres.
+      //
+      //    date_trunc('hour') + FLOOR(minute/15)*15min groups rows into
+      //    15-min windows that align to IST clock hours (not UTC hours).
+      //
+      //    MIN/MAX of EXTRACT(EPOCH FROM total_running_hrs) gives the
+      //    odometer value in seconds at the start and end of each bucket.
+      //      MAX > MIN  → odometer moved        → RUNNING
+      //      MAX = MIN  → odometer frozen        → IDLE
+      //      No bucket  → no ECU data at all     → OFFLINE
+      //
+      //    AT TIME ZONE 'Asia/Kolkata' ensures 15-min boundaries align
+      //    to IST midnight, not UTC midnight.
+      const result = await db.query(
+        `
+        SELECT
+          date_trunc('hour', recorded_at AT TIME ZONE 'Asia/Kolkata')
+            + (FLOOR(EXTRACT(MINUTE FROM recorded_at AT TIME ZONE 'Asia/Kolkata') / 15)
+               * INTERVAL '15 minutes')
+            AS bucket_ist,
+          MIN(EXTRACT(EPOCH FROM total_running_hrs))::float AS hrs_start,
+          MAX(EXTRACT(EPOCH FROM total_running_hrs))::float AS hrs_end,
+          COUNT(*)::int                                      AS row_count
+        FROM live_values
+        WHERE vehicle_master_id = $1
+          AND recorded_at >= $2
+          AND recorded_at <= $3
+          AND total_running_hrs IS NOT NULL
+        GROUP BY bucket_ist
+        ORDER BY bucket_ist ASC
+        `,
+        [id, startTime, endTime]
+      );
+
+      // 4. Compute summary stats server-side.
+      //
+      //    running_seconds: sum of actual odometer delta per bucket.
+      //      This is the real work time — not an estimate.
+      //
+      //    idle_seconds: approximated as 15 min per idle bucket.
+      //      We know the ECU was on (rows exist) but the odometer
+      //      didn't move. 15 min per bucket is a safe upper bound.
+      //
+      //    sessions: count of contiguous RUNNING sequences.
+      //      A new session starts whenever a running bucket follows
+      //      a non-running bucket (idle or offline gap).
+      let runningSeconds = 0;
+      let idleSeconds    = 0;
+      let sessions       = 0;
+      let lastWasRunning = false;
+
+      for (const row of result.rows) {
+        const delta = row.hrs_end - row.hrs_start; // seconds (EPOCH diff)
+        if (delta > 0) {
+          runningSeconds += delta;
+          if (!lastWasRunning) sessions++;
+          lastWasRunning = true;
+        } else {
+          // Idle: bucket has data but odometer didn't move.
+          // Approximate idle time as 15 min per bucket.
+          idleSeconds   += 15 * 60;
+          lastWasRunning = false;
+        }
+      }
+
+      // 5. Shape response
+      logger.info(
+        `Activity vehicle=${id} date=${date}: ${result.rows.length} buckets, ` +
+        `${(runningSeconds / 3600).toFixed(2)}h running, ${sessions} sessions`
+      );
+
+      res.json({
+        date,
+        buckets: result.rows.map((row) => ({
+          // ISO string of bucket start — frontend parses this into IST time
+          bucket:    new Date(row.bucket_ist).toISOString(),
+          hrs_start: row.hrs_start,
+          hrs_end:   row.hrs_end,
+          row_count: row.row_count,
+        })),
+        summary: {
+          running_hours:           Number((runningSeconds / 3600).toFixed(2)),
+          idle_hours:              Number((idleSeconds    / 3600).toFixed(2)),
+          sessions,
+          total_buckets_with_data: result.rows.length,
+        },
+      });
+    } catch (err) {
+      logger.error(`GET /vehicles/${id}/activity error: ${err.message}`);
       res.status(500).json({ error: 'Server error' });
     }
   }
