@@ -649,11 +649,11 @@ router.get(
 /* ============================================================
    GET /api/vehicles/:id/activity?date=YYYY-MM-DD
 
-   Returns 15-minute bucketed activity data for a single day.
+   Returns 5-minute bucketed activity data for a single day.
    Used by the ActivityTimeline component in LiveCharts.jsx.
 
    Each bucket contains:
-     - bucket:    ISO timestamp of the 15-min slot start (IST)
+     - bucket:    ISO timestamp of the 5-min slot start (IST)
      - hrs_start: EPOCH seconds of total_running_hrs at bucket start
      - hrs_end:   EPOCH seconds of total_running_hrs at bucket end
      - row_count: number of telemetry rows in this bucket
@@ -668,7 +668,7 @@ router.get(
 
    All times interpreted in IST (Asia/Kolkata, UTC+5:30).
    Uses existing idx_live index — no new index needed.
-   Returns max 96 rows (96 × 15 min = 24 hours).
+   Returns max 288 rows (288 × 5 min = 24 hours).
 ============================================================ */
 router.get(
   '/:id/activity',
@@ -712,10 +712,10 @@ router.get(
         return res.status(400).json({ error: 'Invalid date format' });
       }
 
-      // 3. Bucket into 15-minute IST-aligned slots in Postgres.
+      // 3. Bucket into 5-minute IST-aligned slots in Postgres.
       //
-      //    date_trunc('hour') + FLOOR(minute/15)*15min groups rows into
-      //    15-min windows that align to IST clock hours (not UTC hours).
+      //    date_trunc('hour') + FLOOR(minute/5)*5min groups rows into
+      //    5-min windows that align to IST clock hours (not UTC hours).
       //
       //    MIN/MAX of EXTRACT(EPOCH FROM total_running_hrs) gives the
       //    odometer value in seconds at the start and end of each bucket.
@@ -723,14 +723,14 @@ router.get(
       //      MAX = MIN  → odometer frozen        → IDLE
       //      No bucket  → no ECU data at all     → OFFLINE
       //
-      //    AT TIME ZONE 'Asia/Kolkata' ensures 15-min boundaries align
+      //    AT TIME ZONE 'Asia/Kolkata' ensures 5-min boundaries align
       //    to IST midnight, not UTC midnight.
       const result = await db.query(
         `
         SELECT
           date_trunc('hour', recorded_at AT TIME ZONE 'Asia/Kolkata')
-            + (FLOOR(EXTRACT(MINUTE FROM recorded_at AT TIME ZONE 'Asia/Kolkata') / 15)
-               * INTERVAL '15 minutes')
+            + (FLOOR(EXTRACT(MINUTE FROM recorded_at AT TIME ZONE 'Asia/Kolkata') / 5)
+               * INTERVAL '5 minutes')
             AS bucket_ist,
           MIN(EXTRACT(EPOCH FROM total_running_hrs))::float AS hrs_start,
           MAX(EXTRACT(EPOCH FROM total_running_hrs))::float AS hrs_end,
@@ -751,9 +751,9 @@ router.get(
       //    running_seconds: sum of actual odometer delta per bucket.
       //      This is the real work time — not an estimate.
       //
-      //    idle_seconds: approximated as 15 min per idle bucket.
+      //    idle_seconds: approximated as 5 min per idle bucket.
       //      We know the ECU was on (rows exist) but the odometer
-      //      didn't move. 15 min per bucket is a safe upper bound.
+      //      didn't move. 5 min per bucket is a safe upper bound.
       //
       //    sessions: count of contiguous RUNNING sequences.
       //      A new session starts whenever a running bucket follows
@@ -771,8 +771,8 @@ router.get(
           lastWasRunning = true;
         } else {
           // Idle: bucket has data but odometer didn't move.
-          // Approximate idle time as 15 min per bucket.
-          idleSeconds   += 15 * 60;
+          // Approximate idle time as 5 min per bucket.
+          idleSeconds   += 5 * 60;
           lastWasRunning = false;
         }
       }
