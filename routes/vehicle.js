@@ -653,18 +653,24 @@ router.get(
    Used by the ActivityTimeline component in LiveCharts.jsx.
 
    Each bucket contains:
-     - bucket:    ISO timestamp of the 5-min slot start (IST)
-     - hrs_start: EPOCH seconds of total_running_hrs at bucket start
-     - hrs_end:   EPOCH seconds of total_running_hrs at bucket end
-     - row_count: number of telemetry rows in this bucket
+     - bucket:         ISO timestamp of the 5-min slot start (IST)
+     - hrs_start:      EPOCH seconds of total_running_hrs at bucket start
+     - hrs_end:        EPOCH seconds of total_running_hrs at bucket end
+     - row_count:      number of telemetry rows in this bucket
+     - battery_status: dominant battery_status value in this bucket
 
    Frontend derives state per bucket:
-     - hrs_end > hrs_start  → RUNNING  (odometer moved)
-     - hrs_end === hrs_start → IDLE    (ECU on, odometer frozen)
-     - bucket missing        → OFFLINE (no data = vehicle off)
+     1. hrs_end > hrs_start                    → RUNNING      (green)
+     2. battery_status = 'Charging'            → CHARGING     (blue)
+     3. battery_status = 'Discharging'         → DISCHARGING  (amber)
+     4. battery_status = anything else or NULL → OFFLINE      (dark)
+        (covers 'OFF', NULL, and garbage values)
 
-   Summary stats (running_hours, idle_hours, sessions) are
-   computed server-side and returned alongside the buckets.
+   Summary stats:
+     - running_hours:     real odometer delta time
+     - discharging_hours: 5 min × count of Discharging idle buckets
+     - charging_hours:    5 min × count of Charging idle buckets
+     - sessions:          count of contiguous RUNNING sequences
 
    All times interpreted in IST (Asia/Kolkata, UTC+5:30).
    Uses existing idx_live index — no new index needed.
@@ -712,19 +718,19 @@ router.get(
         return res.status(400).json({ error: 'Invalid date format' });
       }
 
-      // 3. Bucket into 5-minute IST-aligned slots in Postgres.
+      // 3. Bucket query.
       //
-      //    date_trunc('hour') + FLOOR(minute/5)*5min groups rows into
-      //    5-min windows that align to IST clock hours (not UTC hours).
+      //    MODE() WITHIN GROUP picks the most-frequent battery_status in
+      //    each 5-min bucket. This is a single ordered-set aggregate —
+      //    no subquery or extra index required.
       //
-      //    MIN/MAX of EXTRACT(EPOCH FROM total_running_hrs) gives the
-      //    odometer value in seconds at the start and end of each bucket.
-      //      MAX > MIN  → odometer moved        → RUNNING
-      //      MAX = MIN  → odometer frozen        → IDLE
-      //      No bucket  → no ECU data at all     → OFFLINE
+      //    The frontend uses battery_status to colour stationary buckets:
+      //      'Charging'    → blue
+      //      'Discharging' → amber
+      //      anything else → dark (same as offline)
       //
-      //    AT TIME ZONE 'Asia/Kolkata' ensures 5-min boundaries align
-      //    to IST midnight, not UTC midnight.
+      //    Running buckets (hrs_end > hrs_start) are never re-coloured —
+      //    the odometer always wins.
       const result = await db.query(
         `
         SELECT
@@ -734,7 +740,8 @@ router.get(
             AS bucket_ist,
           MIN(EXTRACT(EPOCH FROM total_running_hrs))::float AS hrs_start,
           MAX(EXTRACT(EPOCH FROM total_running_hrs))::float AS hrs_end,
-          COUNT(*)::int                                      AS row_count
+          COUNT(*)::int                                      AS row_count,
+          MODE() WITHIN GROUP (ORDER BY battery_status)      AS dominant_battery_status
         FROM live_values
         WHERE vehicle_master_id = $1
           AND recorded_at >= $2
@@ -748,53 +755,64 @@ router.get(
 
       // 4. Compute summary stats server-side.
       //
-      //    running_seconds: sum of actual odometer delta per bucket.
-      //      This is the real work time — not an estimate.
+      //    running_seconds:     real odometer delta (accurate).
+      //    discharging_seconds: 5 min × Discharging idle buckets (approximation).
+      //    charging_seconds:    5 min × Charging idle buckets (approximation).
       //
-      //    idle_seconds: approximated as 5 min per idle bucket.
-      //      We know the ECU was on (rows exist) but the odometer
-      //      didn't move. 5 min per bucket is a safe upper bound.
+      //    Buckets with OFF / NULL / garbage battery_status are NOT counted
+      //    in any of the above — they show as offline/dark on the frontend.
       //
       //    sessions: count of contiguous RUNNING sequences.
-      //      A new session starts whenever a running bucket follows
-      //      a non-running bucket (idle or offline gap).
-      let runningSeconds = 0;
-      let idleSeconds    = 0;
-      let sessions       = 0;
-      let lastWasRunning = false;
+      let runningSeconds     = 0;
+      let dischargingSeconds = 0;
+      let chargingSeconds    = 0;
+      let sessions           = 0;
+      let lastWasRunning     = false;
 
       for (const row of result.rows) {
-        const delta = row.hrs_end - row.hrs_start; // seconds (EPOCH diff)
+        const delta  = row.hrs_end - row.hrs_start;
+        const status = row.dominant_battery_status ?? null;
+
         if (delta > 0) {
+          // Odometer moved → running (regardless of battery_status)
           runningSeconds += delta;
           if (!lastWasRunning) sessions++;
           lastWasRunning = true;
         } else {
-          // Idle: bucket has data but odometer didn't move.
-          // Approximate idle time as 5 min per bucket.
-          idleSeconds   += 5 * 60;
           lastWasRunning = false;
+          // Only count meaningful stationary states in the summary
+          if (status === 'Discharging') {
+            dischargingSeconds += 5 * 60;
+          } else if (status === 'Charging') {
+            chargingSeconds += 5 * 60;
+          }
+          // OFF / NULL / garbage → not counted (treated as offline)
         }
       }
 
       // 5. Shape response
       logger.info(
         `Activity vehicle=${id} date=${date}: ${result.rows.length} buckets, ` +
-        `${(runningSeconds / 3600).toFixed(2)}h running, ${sessions} sessions`
+        `${(runningSeconds / 3600).toFixed(2)}h running, ` +
+        `${(dischargingSeconds / 3600).toFixed(2)}h discharging, ` +
+        `${(chargingSeconds / 3600).toFixed(2)}h charging, ` +
+        `${sessions} sessions`
       );
 
       res.json({
         date,
         buckets: result.rows.map((row) => ({
           // ISO string of bucket start — frontend parses this into IST time
-          bucket:    new Date(row.bucket_ist).toISOString(),
-          hrs_start: row.hrs_start,
-          hrs_end:   row.hrs_end,
-          row_count: row.row_count,
+          bucket:         new Date(row.bucket_ist).toISOString(),
+          hrs_start:      row.hrs_start,
+          hrs_end:        row.hrs_end,
+          row_count:      row.row_count,
+          battery_status: row.dominant_battery_status ?? null,
         })),
         summary: {
-          running_hours:           Number((runningSeconds / 3600).toFixed(2)),
-          idle_hours:              Number((idleSeconds    / 3600).toFixed(2)),
+          running_hours:           Number((runningSeconds     / 3600).toFixed(2)),
+          discharging_hours:       Number((dischargingSeconds / 3600).toFixed(2)),
+          charging_hours:          Number((chargingSeconds    / 3600).toFixed(2)),
           sessions,
           total_buckets_with_data: result.rows.length,
         },
