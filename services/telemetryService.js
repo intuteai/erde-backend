@@ -1,5 +1,6 @@
 // services/telemetryService.js
-const db = require("../config/postgres");
+const db     = require("../config/postgres");
+const redis  = require("../config/redis");
 const logger = require("../utils/logger");
 const crypto = require("crypto");
 
@@ -227,6 +228,9 @@ const insertTelemetryItems = async (items = []) => {
     // Collect socket emits — fired only AFTER COMMIT so clients never
     // receive a live_update event for data that was never persisted.
     const pendingEmits = [];
+    // Accumulate max structure dims per vehicle across this batch.
+    // Persisted to vehicle_master + Redis after COMMIT (fire-and-forget).
+    const pendingStructure = new Map();
 
     for (const item of items) {
       const { ts: rawTs, live = {} } = item;
@@ -486,6 +490,32 @@ const insertTelemetryItems = async (items = []) => {
         }
 
         inserted++;
+
+        // Track max module/cell dimensions seen in this batch
+        const rawCell = live.cell_modules;
+        const rawTemp = live.temp_modules;
+        if (Array.isArray(rawCell) || Array.isArray(rawTemp)) {
+          let cellMods = 0, cellsPerMod = 0, tempMods = 0, sensorsPerMod = 0;
+          if (Array.isArray(rawCell)) {
+            cellMods = rawCell.length;
+            for (const m of rawCell) {
+              if (Array.isArray(m)) cellsPerMod = Math.max(cellsPerMod, m.length);
+            }
+          }
+          if (Array.isArray(rawTemp)) {
+            tempMods = rawTemp.length;
+            for (const m of rawTemp) {
+              if (Array.isArray(m)) sensorsPerMod = Math.max(sensorsPerMod, m.length);
+            }
+          }
+          const prev = pendingStructure.get(vehicleMasterId) ?? { cellMods: 0, cellsPerMod: 0, tempMods: 0, sensorsPerMod: 0 };
+          pendingStructure.set(vehicleMasterId, {
+            cellMods:      Math.max(prev.cellMods,      cellMods),
+            cellsPerMod:   Math.max(prev.cellsPerMod,   cellsPerMod),
+            tempMods:      Math.max(prev.tempMods,      tempMods),
+            sensorsPerMod: Math.max(prev.sensorsPerMod, sensorsPerMod),
+          });
+        }
       } catch (itemErr) {
         // Decode which column caused the error from the $N in the error message
         const match = itemErr.where?.match(/\$(\d+)/);
@@ -514,6 +544,28 @@ const insertTelemetryItems = async (items = []) => {
     }
 
     await client.query("COMMIT");
+
+    // Persist structure dims — fire-and-forget so we never block the response.
+    // GREATEST ensures vehicle_master only updates when a new maximum is seen.
+    for (const [vehicleId, { cellMods, cellsPerMod, tempMods, sensorsPerMod }] of pendingStructure) {
+      db.query(
+        `UPDATE vehicle_master
+         SET max_cell_modules       = GREATEST(max_cell_modules,       $2),
+             max_cells_per_module   = GREATEST(max_cells_per_module,   $3),
+             max_temp_modules       = GREATEST(max_temp_modules,       $4),
+             max_sensors_per_module = GREATEST(max_sensors_per_module, $5)
+         WHERE vehicle_master_id = $1
+           AND ($2 > max_cell_modules OR $3 > max_cells_per_module
+                OR $4 > max_temp_modules OR $5 > max_sensors_per_module)`,
+        [vehicleId, cellMods, cellsPerMod, tempMods, sensorsPerMod]
+      ).catch(err => logger.warn(`Structure persist failed (vehicle ${vehicleId}): ${err.message}`));
+
+      redis.set(
+        `vehicle_structure:${vehicleId}`,
+        JSON.stringify({ cellMods, cellsPerMod, tempMods, sensorsPerMod }),
+        { EX: 86400 }
+      ).catch(err => logger.warn(`Structure cache write failed (vehicle ${vehicleId}): ${err.message}`));
+    }
 
     // Fire all socket events now that data is safely on disk
     for (const { vehicleMasterId, ts, live } of pendingEmits) {

@@ -1,11 +1,31 @@
 // routes/database-logs.js - FULLY OPTIMIZED VERSION
 
 const express = require('express');
+const zlib    = require('zlib');
 const db = require('../config/postgres');
 const authenticateToken = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
 const { generalLimiter } = require('../middleware/rateLimiter');
 const logger = require('../utils/logger');
+
+// Backpressure-safe gzip write — pauses the cursor loop when the
+// client is slow so Node's write buffer never grows unbounded.
+function gzipWrite(gz, data) {
+  return new Promise((resolve, reject) => {
+    const ok = gz.write(data);
+    if (ok) return resolve();
+    gz.once('drain', resolve);
+    gz.once('error', reject);
+  });
+}
+
+function gzipEnd(gz) {
+  return new Promise((resolve, reject) => {
+    gz.once('finish', resolve);
+    gz.once('error', reject);
+    gz.end();
+  });
+}
 
 const router = express.Router();
 
@@ -425,6 +445,7 @@ router.get(
     logger.info(`Export starting – vehicle ${vehicleId}: ${totalRows} rows, ${columnKeys.length} requested columns`);
 
     let client;
+    let gz;
     try {
       client = await db.getClient();
       await client.query("SET statement_timeout = '180s'");
@@ -486,12 +507,16 @@ router.get(
       const filename = `telemetry_${vehicleId}_${rangeTag}_${Date.now()}.csv`;
 
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Encoding', 'gzip');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
       res.setHeader('Transfer-Encoding', 'chunked');
       res.setHeader('X-Total-Rows', totalRows.toString());
 
+      gz = zlib.createGzip({ level: 6 });
+      gz.pipe(res);
+
       const csvHeader = activeColumnLabels.map(l => `"${l}"`).join(',') + '\n';
-      res.write(csvHeader);
+      await gzipWrite(gz, csvHeader);
 
       const CHUNK_SIZE = 5000;
       const cursorName = `export_cursor_${Date.now()}_${vehicleId}`;
@@ -518,7 +543,7 @@ router.get(
           }).join(',')
         ).join('\n') + '\n';
 
-        res.write(csvChunk);
+        await gzipWrite(gz, csvChunk);
 
         if (chunkCount % 10 === 0) {
           logger.info(`Export progress – vehicle ${vehicleId}: ${rowCount}/${totalRows} rows (${((rowCount / totalRows) * 100).toFixed(1)}%)`);
@@ -529,7 +554,7 @@ router.get(
       await client.query('COMMIT');
 
       logger.info(`Export complete – vehicle ${vehicleId}: ${rowCount} rows, ${activeColumnKeys.length} columns`);
-      res.end();
+      await gzipEnd(gz);
 
     } catch (err) {
       logger.error(`Export error (vehicle ${vehicleId}): ${err.message}`);
@@ -539,7 +564,7 @@ router.get(
       if (!res.headersSent) {
         return res.status(500).json({ error: 'Export failed' });
       }
-      res.end();
+      if (gz) gz.destroy();
     } finally {
       if (client) client.release();
     }

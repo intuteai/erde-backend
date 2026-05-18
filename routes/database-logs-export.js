@@ -1,11 +1,89 @@
 const express = require('express');
-const db = require('../config/postgres');
+const zlib    = require('zlib');
+const db      = require('../config/postgres');
+const redis   = require('../config/redis');
 const authenticateToken = require('../middleware/auth');
-const checkPermission = require('../middleware/checkPermission');
+const checkPermission   = require('../middleware/checkPermission');
 const { generalLimiter } = require('../middleware/rateLimiter');
 const logger = require('../utils/logger');
 
 const router = express.Router();
+
+// Backpressure-safe gzip helpers — pause the cursor loop when the
+// client is slow so Node's write buffer never grows unbounded.
+function gzipWrite(gz, data) {
+  return new Promise((resolve, reject) => {
+    const ok = gz.write(data);
+    if (ok) return resolve();
+    gz.once('drain', resolve);
+    gz.once('error', reject);
+  });
+}
+
+function gzipEnd(gz) {
+  return new Promise((resolve, reject) => {
+    gz.once('finish', resolve);
+    gz.once('error', reject);
+    gz.end();
+  });
+}
+
+/* -------------------------------------------------------
+   3-tier structure lookup
+   1. Redis   — sub-millisecond, warm after first telemetry batch
+   2. vehicle_master columns — already fetched in ownership row
+   3. 20-row scan — cold-start fallback for brand-new vehicles
+------------------------------------------------------- */
+async function getVehicleStructure(vehicleId, ownershipRow, db, timeClause, params) {
+  // Tier 1: Redis
+  try {
+    const cached = await redis.get(`vehicle_structure:${vehicleId}`);
+    if (cached) {
+      const d = JSON.parse(cached);
+      if (d.cellMods > 0 || d.tempMods > 0) return d;
+    }
+  } catch { /* Redis failure is non-critical */ }
+
+  // Tier 2: vehicle_master columns (already in ownership query result)
+  const row = ownershipRow;
+  const fromDB = {
+    cellMods:      row.max_cell_modules       || 0,
+    cellsPerMod:   row.max_cells_per_module   || 0,
+    tempMods:      row.max_temp_modules       || 0,
+    sensorsPerMod: row.max_sensors_per_module || 0,
+  };
+  if (fromDB.cellMods > 0 || fromDB.tempMods > 0) {
+    redis.set(`vehicle_structure:${vehicleId}`, JSON.stringify(fromDB), { EX: 86400 })
+         .catch(() => {});
+    return fromDB;
+  }
+
+  // Tier 3: cold-start scan — only runs for brand-new vehicles
+  logger.info(`Cold-start structure scan for vehicle ${vehicleId}`);
+  const sample = await db.query(
+    `(SELECT cell_modules, temp_modules FROM live_values
+      WHERE vehicle_master_id = $1 AND (cell_modules IS NOT NULL OR temp_modules IS NOT NULL)
+        AND ${timeClause}
+      ORDER BY recorded_at DESC LIMIT 20)`,
+    params
+  );
+  let cellMods = 0, cellsPerMod = 0, tempMods = 0, sensorsPerMod = 0;
+  for (const r of sample.rows) {
+    if (Array.isArray(r.cell_modules)) {
+      cellMods = Math.max(cellMods, r.cell_modules.length);
+      for (const m of r.cell_modules) {
+        if (Array.isArray(m)) cellsPerMod = Math.max(cellsPerMod, m.length);
+      }
+    }
+    if (Array.isArray(r.temp_modules)) {
+      tempMods = Math.max(tempMods, r.temp_modules.length);
+      for (const m of r.temp_modules) {
+        if (Array.isArray(m)) sensorsPerMod = Math.max(sensorsPerMod, m.length);
+      }
+    }
+  }
+  return { cellMods, cellsPerMod, tempMods, sensorsPerMod };
+}
 
 /* -------------------------------------------------------
    Shared helper: ownership + time filter
@@ -62,7 +140,7 @@ function toIST(date) {
 const CSV_SAFE_TIMESTAMP = (ts) => `"\t${toIST(ts)}"`;
 
 /* -------------------------------------------------------
-   GET ROW COUNT (for progress tracking)
+   GET ROW COUNT (kept for backward compatibility)
 ------------------------------------------------------- */
 router.get(
   '/:id/export/:type/count',
@@ -82,15 +160,12 @@ router.get(
     }
 
     try {
-      // Ownership check
       const ownership = await db.query(
-        `
-        SELECT 1
-        FROM vehicle_master vm
-        JOIN customer_master cm ON vm.customer_id = cm.customer_id
-        WHERE vm.vehicle_master_id = $1
-          AND ($2::int IS NULL OR cm.user_id = $2)
-        `,
+        `SELECT 1
+         FROM vehicle_master vm
+         JOIN customer_master cm ON vm.customer_id = cm.customer_id
+         WHERE vm.vehicle_master_id = $1
+           AND ($2::int IS NULL OR cm.user_id = $2)`,
         [id, isCustomer ? req.user.user_id : null]
       );
 
@@ -100,21 +175,15 @@ router.get(
       }
 
       const { timeClause, params } = await buildTimeFilter(req, id);
-
       const column = type === 'cells' ? 'cell_modules' : 'temp_modules';
 
-      const countQuery = `
-        SELECT COUNT(*) as total
-        FROM live_values
-        WHERE vehicle_master_id = $1
-          AND ${column} IS NOT NULL
-          AND ${timeClause}
-      `;
+      const result = await db.query(
+        `SELECT COUNT(*) as total FROM live_values
+         WHERE vehicle_master_id = $1 AND ${column} IS NOT NULL AND ${timeClause}`,
+        params
+      );
 
-      const result = await db.query(countQuery, params);
-      const total = parseInt(result.rows[0].total, 10);
-
-      return res.status(200).json({ total });
+      return res.status(200).json({ total: parseInt(result.rows[0].total, 10) });
 
     } catch (err) {
       logger.error(`Count error (vehicle ${id}, type ${type}): ${err.message}`);
@@ -124,7 +193,10 @@ router.get(
 );
 
 /* -------------------------------------------------------
-   CELL VOLTAGE EXPORT - STREAMING WITH PROGRESS
+   CELL VOLTAGE EXPORT
+   - Count + structure resolved in parallel
+   - statement_timeout on cursor client
+   - Gzip compressed with backpressure
 ------------------------------------------------------- */
 router.get(
   '/:id/export/cells',
@@ -140,17 +212,16 @@ router.get(
     }
 
     let client;
+    let gz;
 
     try {
-      // Ownership check
       const ownership = await db.query(
-        `
-        SELECT 1
-        FROM vehicle_master vm
-        JOIN customer_master cm ON vm.customer_id = cm.customer_id
-        WHERE vm.vehicle_master_id = $1
-          AND ($2::int IS NULL OR cm.user_id = $2)
-        `,
+        `SELECT vm.max_cell_modules, vm.max_cells_per_module,
+                vm.max_temp_modules, vm.max_sensors_per_module
+         FROM vehicle_master vm
+         JOIN customer_master cm ON vm.customer_id = cm.customer_id
+         WHERE vm.vehicle_master_id = $1
+           AND ($2::int IS NULL OR cm.user_id = $2)`,
         [id, isCustomer ? req.user.user_id : null]
       );
 
@@ -161,164 +232,111 @@ router.get(
 
       const { timeClause, params } = await buildTimeFilter(req, id);
 
-      // Get total count for progress
-      const countResult = await db.query(
-        `
-        SELECT COUNT(*) as total
-        FROM live_values
-        WHERE vehicle_master_id = $1
-          AND cell_modules IS NOT NULL
-          AND ${timeClause}
-        `,
-        params
-      );
+      // Count and structure lookup run in parallel
+      const [countResult, structure] = await Promise.all([
+        db.query(
+          `SELECT COUNT(*) as total FROM live_values
+           WHERE vehicle_master_id = $1 AND cell_modules IS NOT NULL AND ${timeClause}`,
+          params
+        ),
+        getVehicleStructure(id, ownership.rows[0], db, timeClause, params),
+      ]);
 
       const totalRows = parseInt(countResult.rows[0].total, 10);
 
       if (totalRows === 0) {
         logger.info(`No cell voltage data for vehicle ${id}`);
-        return res.status(200).send('No data available');
+        return res.status(400).json({ error: 'No cell voltage data for the selected range' });
       }
 
-      logger.info(`Starting cell voltage export for vehicle ${id}: ${totalRows} total rows`);
+      const maxModules = structure.cellMods;
+      const maxCells   = structure.cellsPerMod;
 
-      // Get dedicated client for cursor
+      logger.info(`Cell voltage export: vehicle ${id}, ${totalRows} rows, ${maxModules}x${maxCells} structure`);
+
       client = await db.getClient();
+      await client.query("SET statement_timeout = '180s'");
 
-      const query = `
-        SELECT recorded_at, cell_modules
-        FROM live_values
-        WHERE vehicle_master_id = $1
-          AND cell_modules IS NOT NULL
-          AND ${timeClause}
-        ORDER BY recorded_at ASC
-      `;
-
-      // Start transaction and create cursor
       const cursorName = `cells_cursor_${Date.now()}`;
       await client.query('BEGIN');
-      await client.query(`DECLARE ${cursorName} CURSOR FOR ${query}`, params);
-
-      // Set response headers
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader(
-        'Content-Disposition',
-        `attachment; filename="vehicle_${id}_cell_voltages_${Date.now()}.csv"`
+      await client.query(
+        `DECLARE ${cursorName} CURSOR FOR
+         SELECT recorded_at, cell_modules FROM live_values
+         WHERE vehicle_master_id = $1 AND cell_modules IS NOT NULL AND ${timeClause}
+         ORDER BY recorded_at ASC`,
+        params
       );
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Content-Disposition', `attachment; filename="vehicle_${id}_cell_voltages_${Date.now()}.csv"`);
       res.setHeader('Transfer-Encoding', 'chunked');
       res.setHeader('X-Total-Rows', totalRows.toString());
 
-      // UTF-8 BOM for Excel compatibility
-      res.write('\uFEFF');
+      gz = zlib.createGzip({ level: 6 });
+      gz.pipe(res);
 
-      // First pass: determine max structure
-      const CHUNK_SIZE = 1000;
-      let maxModules = 0;
-      let maxCells = 0;
-      let rowCount = 0;
-
-      // Scan first chunk to determine structure
-      const structureSample = await client.query(`FETCH 100 FROM ${cursorName}`);
-      for (const r of structureSample.rows) {
-        if (Array.isArray(r.cell_modules)) {
-          maxModules = Math.max(maxModules, r.cell_modules.length);
-          r.cell_modules.forEach(m =>
-            maxCells = Math.max(maxCells, Array.isArray(m) ? m.length : 0)
-          );
-        }
-      }
-
-      // Build headers
+      // UTF-8 BOM + CSV header
       const headers = ['Timestamp'];
       for (let m = 1; m <= maxModules; m++) {
-        for (let c = 1; c <= maxCells; c++) {
-          headers.push(`M${m}_C${c}`);
-        }
+        for (let c = 1; c <= maxCells; c++) headers.push(`M${m}_C${c}`);
       }
+      await gzipWrite(gz, '﻿' + headers.join(',') + '\n');
 
-      // Write CSV header
-      res.write(headers.join(',') + '\n');
+      const CHUNK_SIZE = 1000;
+      let rowCount = 0;
+      let chunkCount = 0;
 
-      // Write sample rows
-      for (const r of structureSample.rows) {
-        const row = new Array(headers.length).fill('');
-        row[0] = CSV_SAFE_TIMESTAMP(r.recorded_at);
-
-        r.cell_modules?.forEach((module, mi) => {
-          module?.forEach((val, ci) => {
-            const col = 1 + mi * maxCells + ci;
-            if (col < row.length) row[col] = val ?? '';
-          });
-        });
-
-        res.write(row.join(',') + '\n');
-        rowCount++;
-      }
-
-      // Continue with remaining data in chunks
-      let chunkCount = 1;
       while (true) {
         const { rows } = await client.query(`FETCH ${CHUNK_SIZE} FROM ${cursorName}`);
-
         if (rows.length === 0) break;
 
         chunkCount++;
-
         const csvChunk = rows.map(r => {
           const row = new Array(headers.length).fill('');
           row[0] = CSV_SAFE_TIMESTAMP(r.recorded_at);
-
           r.cell_modules?.forEach((module, mi) => {
             module?.forEach((val, ci) => {
               const col = 1 + mi * maxCells + ci;
               if (col < row.length) row[col] = val ?? '';
             });
           });
-
           return row.join(',');
         }).join('\n') + '\n';
 
-        res.write(csvChunk);
+        await gzipWrite(gz, csvChunk);
         rowCount += rows.length;
 
         if (chunkCount % 10 === 0) {
-          const percentComplete = ((rowCount / totalRows) * 100).toFixed(1);
-          logger.info(`Cell export progress: ${rowCount}/${totalRows} rows (${percentComplete}%) for vehicle ${id}`);
+          logger.info(`Cell export: ${rowCount}/${totalRows} rows (${((rowCount / totalRows) * 100).toFixed(1)}%) vehicle ${id}`);
         }
       }
 
       await client.query(`CLOSE ${cursorName}`);
       await client.query('COMMIT');
-
-      logger.info(`Cell voltage export completed: ${rowCount} rows for vehicle ${id}`);
-      res.end();
+      logger.info(`Cell voltage export complete: ${rowCount} rows for vehicle ${id}`);
+      await gzipEnd(gz);
 
     } catch (err) {
       logger.error(`Cell export failed (vehicle ${id}): ${err.message}`);
-
       if (client) {
-        try {
-          await client.query('ROLLBACK');
-        } catch (rollbackErr) {
-          logger.error(`Rollback error: ${rollbackErr.message}`);
-        }
+        try { await client.query('ROLLBACK'); } catch (e) { logger.error(`Rollback error: ${e.message}`); }
       }
-
       if (!res.headersSent) {
         return res.status(500).json({ error: 'Export failed' });
-      } else {
-        res.end();
       }
+      if (gz) gz.destroy();
     } finally {
-      if (client) {
-        client.release();
-      }
+      if (client) client.release();
     }
   }
 );
 
 /* -------------------------------------------------------
-   TEMPERATURE SENSOR EXPORT - STREAMING WITH PROGRESS
+   TEMPERATURE SENSOR EXPORT
+   - Count + structure resolved in parallel
+   - statement_timeout on cursor client
+   - Gzip compressed with backpressure
 ------------------------------------------------------- */
 router.get(
   '/:id/export/temps',
@@ -334,17 +352,16 @@ router.get(
     }
 
     let client;
+    let gz;
 
     try {
-      // Ownership check
       const ownership = await db.query(
-        `
-        SELECT 1
-        FROM vehicle_master vm
-        JOIN customer_master cm ON vm.customer_id = cm.customer_id
-        WHERE vm.vehicle_master_id = $1
-          AND ($2::int IS NULL OR cm.user_id = $2)
-        `,
+        `SELECT vm.max_cell_modules, vm.max_cells_per_module,
+                vm.max_temp_modules, vm.max_sensors_per_module
+         FROM vehicle_master vm
+         JOIN customer_master cm ON vm.customer_id = cm.customer_id
+         WHERE vm.vehicle_master_id = $1
+           AND ($2::int IS NULL OR cm.user_id = $2)`,
         [id, isCustomer ? req.user.user_id : null]
       );
 
@@ -355,158 +372,102 @@ router.get(
 
       const { timeClause, params } = await buildTimeFilter(req, id);
 
-      // Get total count for progress
-      const countResult = await db.query(
-        `
-        SELECT COUNT(*) as total
-        FROM live_values
-        WHERE vehicle_master_id = $1
-          AND temp_modules IS NOT NULL
-          AND ${timeClause}
-        `,
-        params
-      );
+      // Count and structure lookup run in parallel
+      const [countResult, structure] = await Promise.all([
+        db.query(
+          `SELECT COUNT(*) as total FROM live_values
+           WHERE vehicle_master_id = $1 AND temp_modules IS NOT NULL AND ${timeClause}`,
+          params
+        ),
+        getVehicleStructure(id, ownership.rows[0], db, timeClause, params),
+      ]);
 
       const totalRows = parseInt(countResult.rows[0].total, 10);
 
       if (totalRows === 0) {
         logger.info(`No temperature data for vehicle ${id}`);
-        return res.status(200).send('No data available');
+        return res.status(400).json({ error: 'No temperature data for the selected range' });
       }
 
-      logger.info(`Starting temperature export for vehicle ${id}: ${totalRows} total rows`);
+      const maxModules = structure.tempMods;
+      const maxSensors = structure.sensorsPerMod;
 
-      // Get dedicated client for cursor
+      logger.info(`Temperature export: vehicle ${id}, ${totalRows} rows, ${maxModules}x${maxSensors} structure`);
+
       client = await db.getClient();
+      await client.query("SET statement_timeout = '180s'");
 
-      const query = `
-        SELECT recorded_at, temp_modules
-        FROM live_values
-        WHERE vehicle_master_id = $1
-          AND temp_modules IS NOT NULL
-          AND ${timeClause}
-        ORDER BY recorded_at ASC
-      `;
-
-      // Start transaction and create cursor
       const cursorName = `temps_cursor_${Date.now()}`;
       await client.query('BEGIN');
-      await client.query(`DECLARE ${cursorName} CURSOR FOR ${query}`, params);
-
-      // Set response headers
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader(
-        'Content-Disposition',
-        `attachment; filename="vehicle_${id}_temperature_sensors_${Date.now()}.csv"`
+      await client.query(
+        `DECLARE ${cursorName} CURSOR FOR
+         SELECT recorded_at, temp_modules FROM live_values
+         WHERE vehicle_master_id = $1 AND temp_modules IS NOT NULL AND ${timeClause}
+         ORDER BY recorded_at ASC`,
+        params
       );
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Content-Disposition', `attachment; filename="vehicle_${id}_temperature_sensors_${Date.now()}.csv"`);
       res.setHeader('Transfer-Encoding', 'chunked');
       res.setHeader('X-Total-Rows', totalRows.toString());
 
-      // UTF-8 BOM for Excel compatibility
-      res.write('\uFEFF');
+      gz = zlib.createGzip({ level: 6 });
+      gz.pipe(res);
 
-      // First pass: determine max structure
-      const CHUNK_SIZE = 1000;
-      let maxModules = 0;
-      let maxSensors = 0;
-      let rowCount = 0;
-
-      // Scan first chunk to determine structure
-      const structureSample = await client.query(`FETCH 100 FROM ${cursorName}`);
-      for (const r of structureSample.rows) {
-        if (Array.isArray(r.temp_modules)) {
-          maxModules = Math.max(maxModules, r.temp_modules.length);
-          r.temp_modules.forEach(m =>
-            maxSensors = Math.max(maxSensors, Array.isArray(m) ? m.length : 0)
-          );
-        }
-      }
-
-      // Build headers
+      // UTF-8 BOM + CSV header
       const headers = ['Timestamp'];
       for (let m = 1; m <= maxModules; m++) {
-        for (let t = 1; t <= maxSensors; t++) {
-          headers.push(`M${m}_T${t}`);
-        }
+        for (let t = 1; t <= maxSensors; t++) headers.push(`M${m}_T${t}`);
       }
+      await gzipWrite(gz, '﻿' + headers.join(',') + '\n');
 
-      // Write CSV header
-      res.write(headers.join(',') + '\n');
+      const CHUNK_SIZE = 1000;
+      let rowCount = 0;
+      let chunkCount = 0;
 
-      // Write sample rows
-      for (const r of structureSample.rows) {
-        const row = new Array(headers.length).fill('');
-        row[0] = CSV_SAFE_TIMESTAMP(r.recorded_at);
-
-        r.temp_modules?.forEach((module, mi) => {
-          module?.forEach((val, ti) => {
-            const col = 1 + mi * maxSensors + ti;
-            if (col < row.length) row[col] = val ?? '';
-          });
-        });
-
-        res.write(row.join(',') + '\n');
-        rowCount++;
-      }
-
-      // Continue with remaining data in chunks
-      let chunkCount = 1;
       while (true) {
         const { rows } = await client.query(`FETCH ${CHUNK_SIZE} FROM ${cursorName}`);
-
         if (rows.length === 0) break;
 
         chunkCount++;
-
         const csvChunk = rows.map(r => {
           const row = new Array(headers.length).fill('');
           row[0] = CSV_SAFE_TIMESTAMP(r.recorded_at);
-
           r.temp_modules?.forEach((module, mi) => {
             module?.forEach((val, ti) => {
               const col = 1 + mi * maxSensors + ti;
               if (col < row.length) row[col] = val ?? '';
             });
           });
-
           return row.join(',');
         }).join('\n') + '\n';
 
-        res.write(csvChunk);
+        await gzipWrite(gz, csvChunk);
         rowCount += rows.length;
 
         if (chunkCount % 10 === 0) {
-          const percentComplete = ((rowCount / totalRows) * 100).toFixed(1);
-          logger.info(`Temp export progress: ${rowCount}/${totalRows} rows (${percentComplete}%) for vehicle ${id}`);
+          logger.info(`Temp export: ${rowCount}/${totalRows} rows (${((rowCount / totalRows) * 100).toFixed(1)}%) vehicle ${id}`);
         }
       }
 
       await client.query(`CLOSE ${cursorName}`);
       await client.query('COMMIT');
-
-      logger.info(`Temperature export completed: ${rowCount} rows for vehicle ${id}`);
-      res.end();
+      logger.info(`Temperature export complete: ${rowCount} rows for vehicle ${id}`);
+      await gzipEnd(gz);
 
     } catch (err) {
       logger.error(`Temp export failed (vehicle ${id}): ${err.message}`);
-
       if (client) {
-        try {
-          await client.query('ROLLBACK');
-        } catch (rollbackErr) {
-          logger.error(`Rollback error: ${rollbackErr.message}`);
-        }
+        try { await client.query('ROLLBACK'); } catch (e) { logger.error(`Rollback error: ${e.message}`); }
       }
-
       if (!res.headersSent) {
         return res.status(500).json({ error: 'Export failed' });
-      } else {
-        res.end();
       }
+      if (gz) gz.destroy();
     } finally {
-      if (client) {
-        client.release();
-      }
+      if (client) client.release();
     }
   }
 );
