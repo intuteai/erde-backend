@@ -1,13 +1,26 @@
-// routes/auth.js - SAFE VERSION (USE THIS ONE)
+// routes/auth.js
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const db = require('../config/postgres');
 const logger = require('../utils/logger');
+const authenticateToken = require('../middleware/auth');
 require('dotenv').config();
 
 const router = express.Router();
 
+const COOKIE_DEFAULTS = {
+  httpOnly: true,
+  secure: true,
+  sameSite: 'Strict',
+};
+
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+// POST /api/auth/login
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
 
@@ -18,7 +31,6 @@ router.post('/login', async (req, res) => {
   try {
     logger.info(`Login attempt for email: ${email}`);
 
-    // Step 1: Get user
     const userResult = await db.query(
       'SELECT user_id, email, password_hash, name, role_id FROM users WHERE email = $1',
       [email]
@@ -31,14 +43,12 @@ router.post('/login', async (req, res) => {
 
     const user = userResult.rows[0];
 
-    // Step 2: Verify password
     const validPassword = await bcrypt.compare(password, user.password_hash);
     if (!validPassword) {
       logger.warn(`Login failed: Invalid password - ${email}`);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // Step 3: Get role name safely
     let roleName = 'customer';
     try {
       const roleResult = await db.query(
@@ -52,7 +62,6 @@ router.post('/login', async (req, res) => {
       logger.warn(`Role lookup failed for user ${email}: ${e.message}`);
     }
 
-    // Step 4: Get customer_id safely
     let customerId = null;
     try {
       const custResult = await db.query(
@@ -64,8 +73,7 @@ router.post('/login', async (req, res) => {
       logger.debug(`customer_master lookup skipped for ${email}`);
     }
 
-    // Step 5: Generate token
-    const token = jwt.sign(
+    const accessToken = jwt.sign(
       {
         user_id: user.user_id,
         email: user.email,
@@ -74,13 +82,40 @@ router.post('/login', async (req, res) => {
         customer_id: customerId,
       },
       process.env.JWT_SECRET,
-      { expiresIn: '24h' }
+      { expiresIn: '15m' }
     );
+
+    const refreshToken = crypto.randomBytes(64).toString('hex');
+    const tokenHash = hashToken(refreshToken);
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+    await db.query(
+      `INSERT INTO refresh_tokens (user_id, token_hash, device_info, ip_address, expires_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        user.user_id,
+        tokenHash,
+        req.headers['user-agent'] || null,
+        req.ip || null,
+        expiresAt,
+      ]
+    );
+
+    res.cookie('access_token', accessToken, {
+      ...COOKIE_DEFAULTS,
+      maxAge: 15 * 60 * 1000,
+      path: '/',
+    });
+
+    res.cookie('refresh_token', refreshToken, {
+      ...COOKIE_DEFAULTS,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: '/api/auth',
+    });
 
     logger.info(`Login SUCCESS: ${email} (role: ${roleName})`);
 
     res.json({
-      token,
       user: {
         name: user.name || email.split('@')[0],
         email: user.email,
@@ -92,6 +127,81 @@ router.post('/login', async (req, res) => {
     logger.error(`CRITICAL Login error for ${email}: ${err.message}`, { stack: err.stack });
     res.status(500).json({ error: 'Server error during login' });
   }
+});
+
+// POST /api/auth/refresh
+router.post('/refresh', async (req, res) => {
+  const refreshToken = req.cookies?.refresh_token;
+
+  if (!refreshToken) {
+    return res.status(401).json({ error: 'Refresh token missing' });
+  }
+
+  const tokenHash = hashToken(refreshToken);
+
+  try {
+    const result = await db.query(
+      `SELECT rt.user_id, u.email, u.name, r.role_name, cm.customer_id
+       FROM refresh_tokens rt
+       JOIN users u ON u.user_id = rt.user_id
+       JOIN roles r ON r.role_id = u.role_id
+       LEFT JOIN customer_master cm ON cm.user_id = rt.user_id
+       WHERE rt.token_hash = $1 AND rt.expires_at > now()`,
+      [tokenHash]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid or expired refresh token' });
+    }
+
+    const { user_id, email, name, role_name, customer_id } = result.rows[0];
+
+    const accessToken = jwt.sign(
+      { user_id, email, role: role_name, name, customer_id },
+      process.env.JWT_SECRET,
+      { expiresIn: '15m' }
+    );
+
+    await db.query(
+      'UPDATE refresh_tokens SET last_used_at = now() WHERE token_hash = $1',
+      [tokenHash]
+    );
+
+    res.cookie('access_token', accessToken, {
+      ...COOKIE_DEFAULTS,
+      maxAge: 15 * 60 * 1000,
+      path: '/',
+    });
+
+    res.json({ user: { name, email, role: role_name, customer_id } });
+  } catch (err) {
+    logger.error(`Refresh error: ${err.message}`);
+    res.status(500).json({ error: 'Server error during token refresh' });
+  }
+});
+
+// POST /api/auth/logout
+router.post('/logout', async (req, res) => {
+  const refreshToken = req.cookies?.refresh_token;
+
+  if (refreshToken) {
+    const tokenHash = hashToken(refreshToken);
+    try {
+      await db.query('DELETE FROM refresh_tokens WHERE token_hash = $1', [tokenHash]);
+    } catch (err) {
+      logger.warn(`Logout DB cleanup failed: ${err.message}`);
+    }
+  }
+
+  res.clearCookie('access_token', { path: '/' });
+  res.clearCookie('refresh_token', { path: '/api/auth' });
+  res.json({ message: 'Logged out' });
+});
+
+// GET /api/auth/me
+router.get('/me', authenticateToken, (req, res) => {
+  const { user_id, email, role, name, customer_id } = req.user;
+  res.json({ user: { user_id, email, role, name, customer_id } });
 });
 
 module.exports = router;
