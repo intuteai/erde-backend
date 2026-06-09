@@ -1,6 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
+const helmet = require('helmet');
 const logger = require('./utils/logger');
 
 /* =========================
@@ -28,7 +30,7 @@ const hmiRoutes                = require('./routes/hmi.js');
 /* =========================
    RATE LIMITERS
 ========================= */
-const { generalLimiter } = require('./middleware/rateLimiter');
+const { generalLimiter, strictLimiter } = require('./middleware/rateLimiter');
 
 const app = express();
 
@@ -65,9 +67,30 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 /* =========================
+   COOKIE & SECURITY
+========================= */
+app.use(cookieParser());
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc:  ["'self'"],
+        connectSrc: ["'self'", 'https://analytics.erdeenergy.in'],
+        imgSrc:     ["'self'", 'data:'],
+        styleSrc:   ["'self'", "'unsafe-inline'"],
+      },
+    },
+    hsts:       { maxAge: 31536000, includeSubDomains: true },
+    frameguard: { action: 'deny' },
+    noSniff:    true,
+  })
+);
+
+/* =========================
    PUBLIC ROUTES
 ========================= */
-app.use('/api/auth', authRoutes);
+app.use('/api/auth', strictLimiter, authRoutes);
 
 app.get('/health', (req, res) => {
   res.json({
