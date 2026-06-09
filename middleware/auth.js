@@ -6,8 +6,8 @@ function authenticateToken(req, res, next) {
   let token = null;
 
   // 1. Primary: HttpOnly cookie (set by login/refresh endpoints)
-  if (req.cookies && req.cookies.access_token) {
-    token = req.cookies.access_token;
+  if (req.cookies && typeof req.cookies.access_token === 'string') {
+    token = req.cookies.access_token.trim();
   }
 
   // 2. Fallback: Authorization header (non-browser clients, CLI tools)
