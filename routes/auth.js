@@ -193,8 +193,8 @@ router.post('/logout', async (req, res) => {
     }
   }
 
-  res.clearCookie('access_token', { path: '/' });
-  res.clearCookie('refresh_token', { path: '/api/auth' });
+  res.clearCookie('access_token', { ...COOKIE_DEFAULTS, path: '/' });
+  res.clearCookie('refresh_token', { ...COOKIE_DEFAULTS, path: '/api/auth' });
   res.json({ message: 'Logged out' });
 });
 
