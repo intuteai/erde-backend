@@ -5,18 +5,24 @@ require('dotenv').config();
 function authenticateToken(req, res, next) {
   let token = null;
 
-  // 1. Primary: Authorization header (used by fetch, Axios, etc.)
-  const authHeader = req.header('Authorization');
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    token = authHeader.replace('Bearer ', '').trim();
+  // 1. Primary: HttpOnly cookie (set by login/refresh endpoints)
+  if (req.cookies && req.cookies.access_token) {
+    token = req.cookies.access_token;
   }
 
-  // 2. Fallback: Query parameter (required for native EventSource / SSE)
+  // 2. Fallback: Authorization header (non-browser clients, CLI tools)
+  if (!token) {
+    const authHeader = req.header('Authorization');
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.replace('Bearer ', '').trim();
+    }
+  }
+
+  // 3. Fallback: Query parameter (required for native EventSource / SSE)
   if (!token && req.query.token) {
     token = typeof req.query.token === 'string' ? req.query.token.trim() : null;
   }
 
-  // 3. If still no token → reject
   if (!token) {
     return res
       .status(401)
@@ -26,7 +32,6 @@ function authenticateToken(req, res, next) {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    // 🔐 HARDENING — ensure required fields exist
     if (!decoded.user_id || !decoded.role) {
       return res.status(401).json({ error: 'Invalid token payload' });
     }
