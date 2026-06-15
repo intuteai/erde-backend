@@ -941,7 +941,7 @@ router.get(
       } catch (err) {
         logger.error(`SSE interval error for vehicle ${id}: ${err.message}`);
       }
-    }, 1000);
+    }, 500);
 
     // Heartbeat keeps the connection alive through proxies and load balancers
     const heartbeat = setInterval(() => {

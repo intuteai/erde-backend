@@ -1,16 +1,21 @@
+const fs = require('fs');
 const { Pool } = require('pg');
 const logger = require('../utils/logger');
 require('dotenv').config();
 
 const isTest = process.env.NODE_ENV === 'test';
 
-let pool; // 🔒 SINGLETON
+const ssl = process.env.DB_SSL_CA
+  ? { rejectUnauthorized: true, ca: fs.readFileSync(process.env.DB_SSL_CA) }
+  : { rejectUnauthorized: false };
+
+let pool; // SINGLETON
 
 function getPool() {
   if (!pool) {
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false },
+      ssl,
 
       // ✅ SAFE LIMITS (Aiven + Jest friendly)
       max: isTest ? 8 : 15,

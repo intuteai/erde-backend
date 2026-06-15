@@ -1,8 +1,9 @@
 // services/telemetryService.js
-const db     = require("../config/postgres");
-const redis  = require("../config/redis");
-const logger = require("../utils/logger");
-const crypto = require("crypto");
+const db       = require("../config/postgres");
+const redis    = require("../config/redis");
+const logger   = require("../utils/logger");
+const crypto   = require("crypto");
+const { liveCache } = require("./liveCache");
 
 /* =========================
    SOCKET.IO INJECTION
@@ -225,6 +226,7 @@ const insertTelemetryItems = async (items = []) => {
     await client.query("BEGIN");
 
     let inserted = 0;
+    const insertedVehicles = new Set();
     // Collect socket emits — fired only AFTER COMMIT so clients never
     // receive a live_update event for data that was never persisted.
     const pendingEmits = [];
@@ -490,6 +492,7 @@ const insertTelemetryItems = async (items = []) => {
         }
 
         inserted++;
+        insertedVehicles.add(vehicleMasterId);
 
         // Track max module/cell dimensions seen in this batch
         const rawCell = live.cell_modules;
@@ -544,6 +547,12 @@ const insertTelemetryItems = async (items = []) => {
     }
 
     await client.query("COMMIT");
+
+    // Invalidate live cache for every vehicle written in this batch so the
+    // next SSE poll immediately fetches fresh data rather than waiting for TTL.
+    for (const vid of insertedVehicles) {
+      liveCache.delete(`vehicle_live:${vid}`);
+    }
 
     // Persist structure dims — fire-and-forget so we never block the response.
     // GREATEST ensures vehicle_master only updates when a new maximum is seen.

@@ -18,7 +18,7 @@ function authenticateToken(req, res, next) {
     }
   }
 
-  // 3. Fallback: Query parameter (required for native EventSource / SSE)
+  // 3. Fallback: Query parameter (legacy; frontend uses { withCredentials: true } on EventSource)
   if (!token && req.query.token) {
     token = typeof req.query.token === 'string' ? req.query.token.trim() : null;
   }

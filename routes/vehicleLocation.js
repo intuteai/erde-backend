@@ -59,7 +59,7 @@ function haversineMeters(a, b) {
 ============================================================ */
 router.get(
   '/:id/location/stream',
-  authenticateToken, // supports header OR ?token=
+  authenticateToken, // reads HttpOnly cookie (primary) or Authorization header
   checkPermission('live_view', 'read'),
   liveRateLimiter,
   async (req, res) => {
