@@ -117,6 +117,10 @@ router.post('/login', async (req, res) => {
       path: '/',
     });
 
+    // Clear any legacy cookies left from old path configurations
+    res.clearCookie('refresh_token', { ...COOKIE_DEFAULTS, path: '/api' });
+    res.clearCookie('refresh_token', { ...COOKIE_DEFAULTS, path: '/api/auth' });
+
     logger.info(`Login SUCCESS: ${email} (role: ${roleName})`);
 
     res.json({
@@ -199,6 +203,8 @@ router.post('/logout', async (req, res) => {
 
   res.clearCookie('access_token', { ...COOKIE_DEFAULTS, path: '/' });
   res.clearCookie('refresh_token', { ...COOKIE_DEFAULTS, path: '/' });
+  res.clearCookie('refresh_token', { ...COOKIE_DEFAULTS, path: '/api' });
+  res.clearCookie('refresh_token', { ...COOKIE_DEFAULTS, path: '/api/auth' });
   res.json({ message: 'Logged out' });
 });
 
