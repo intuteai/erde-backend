@@ -12,9 +12,13 @@ const router = express.Router();
 
 const COOKIE_DEFAULTS = {
   httpOnly: true,
-  secure: true,
+  secure: process.env.COOKIE_SECURE !== 'false',
   sameSite: 'Strict',
 };
+
+// Session duration: 7 days. JWT expiry (15 min) triggers silent refresh via interceptor;
+// cookie maxAge is decoupled so both cookies survive the full session without browser deletion.
+const SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 
 function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
@@ -103,14 +107,14 @@ router.post('/login', async (req, res) => {
 
     res.cookie('access_token', accessToken, {
       ...COOKIE_DEFAULTS,
-      maxAge: 15 * 60 * 1000,
+      maxAge: SESSION_MAX_AGE,
       path: '/',
     });
 
     res.cookie('refresh_token', refreshToken, {
       ...COOKIE_DEFAULTS,
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-      path: '/api/auth',
+      maxAge: SESSION_MAX_AGE,
+      path: '/api',
     });
 
     logger.info(`Login SUCCESS: ${email} (role: ${roleName})`);
@@ -169,7 +173,7 @@ router.post('/refresh', async (req, res) => {
 
     res.cookie('access_token', accessToken, {
       ...COOKIE_DEFAULTS,
-      maxAge: 15 * 60 * 1000,
+      maxAge: SESSION_MAX_AGE,
       path: '/',
     });
 
@@ -194,7 +198,7 @@ router.post('/logout', async (req, res) => {
   }
 
   res.clearCookie('access_token', { ...COOKIE_DEFAULTS, path: '/' });
-  res.clearCookie('refresh_token', { ...COOKIE_DEFAULTS, path: '/api/auth' });
+  res.clearCookie('refresh_token', { ...COOKIE_DEFAULTS, path: '/api' });
   res.json({ message: 'Logged out' });
 });
 
