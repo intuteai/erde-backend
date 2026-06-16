@@ -114,7 +114,7 @@ router.post('/login', async (req, res) => {
     res.cookie('refresh_token', refreshToken, {
       ...COOKIE_DEFAULTS,
       maxAge: SESSION_MAX_AGE,
-      path: '/api',
+      path: '/',
     });
 
     logger.info(`Login SUCCESS: ${email} (role: ${roleName})`);
@@ -198,7 +198,7 @@ router.post('/logout', async (req, res) => {
   }
 
   res.clearCookie('access_token', { ...COOKIE_DEFAULTS, path: '/' });
-  res.clearCookie('refresh_token', { ...COOKIE_DEFAULTS, path: '/api' });
+  res.clearCookie('refresh_token', { ...COOKIE_DEFAULTS, path: '/' });
   res.json({ message: 'Logged out' });
 });
 
