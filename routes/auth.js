@@ -181,6 +181,17 @@ router.post('/refresh', async (req, res) => {
       path: '/',
     });
 
+    // Re-issue refresh_token cookie to extend the 7-day window from last activity
+    res.cookie('refresh_token', refreshToken, {
+      ...COOKIE_DEFAULTS,
+      maxAge: SESSION_MAX_AGE,
+      path: '/',
+    });
+
+    // Clear any legacy path cookies to prevent duplicate-cookie conflicts
+    res.clearCookie('refresh_token', { ...COOKIE_DEFAULTS, path: '/api' });
+    res.clearCookie('refresh_token', { ...COOKIE_DEFAULTS, path: '/api/auth' });
+
     res.json({ user: { name, email, role: role_name, customer_id } });
   } catch (err) {
     logger.error(`Refresh error: ${err.message}`);
