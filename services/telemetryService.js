@@ -32,6 +32,23 @@ const toNum = (v) =>
 
 const toText = (v) => (v === null || v === undefined ? null : String(v));
 
+// For INTEGER columns: rounds fractional input and nulls anything that can't fit,
+// so one odd sensor value never fails the INSERT and drops the whole telemetry row.
+const INT4_MAX = 2147483647;
+const toInt = (v) => {
+  const n = toNum(v);
+  if (n === null || !Number.isFinite(n)) return null;
+  const r = Math.round(n);
+  return Math.abs(r) > INT4_MAX ? null : r;
+};
+
+// For NUMERIC(p,s) columns: nulls values that would overflow (e.g. numeric(5,2) → |v| < 999.995).
+const toBoundedNum = (v, maxAbsExclusive) => {
+  const n = toNum(v);
+  if (n === null || !Number.isFinite(n)) return null;
+  return Math.abs(n) >= maxAbsExclusive ? null : n;
+};
+
 const toJsonb = (v) => {
   if (!v || typeof v !== "object") return null;
   return JSON.stringify(v);
@@ -198,9 +215,12 @@ const LIVE_VALUES_COLUMNS = [
   "evcc1_ac_max_current_value_a",   // $111
   // PERIPHERALS
   "hydraulic_oil_temp_c",           // $112
+  // OIL MOTOR (MCU2)
+  "oil_motor_speed_rpm",            // $113
+  "oil_motor_temp_c",               // $114
   // MUST BE LAST — jsonb columns
-  "cell_modules",                   // $113
-  "temp_modules",                   // $114
+  "cell_modules",                   // $115
+  "temp_modules",                   // $116
 ];
 
 /* =========================
@@ -399,9 +419,12 @@ const insertTelemetryItems = async (items = []) => {
         toNum(live.evcc1_ac_max_current_value_a),     // $111
         // PERIPHERALS
         toNum(live.hydraulic_oil_temp_c),             // $112
+        // OIL MOTOR (MCU2) — null when stale, absent on older HMI builds
+        toInt(live.oil_motor_speed_rpm),              // $113  integer
+        toBoundedNum(live.oil_motor_temp_c, 999.995), // $114  numeric(5,2)
         // MUST BE LAST — jsonb columns
-        toJsonb(live.cell_modules),                   // $113
-        toJsonb(live.temp_modules),                   // $114
+        toJsonb(live.cell_modules),                   // $115
+        toJsonb(live.temp_modules),                   // $116
       ];
 
       // Safety assert — if LIVE_VALUES_COLUMNS, values[], and SQL ever drift
@@ -461,6 +484,7 @@ const insertTelemetryItems = async (items = []) => {
             evcc1_lock_status, evcc1_lock_alarm, evcc1_dcac_chg_mode,
             evcc1_evse_evcc_chg_finished, evcc1_ac_max_current_value_a,
             hydraulic_oil_temp_c,
+            oil_motor_speed_rpm, oil_motor_temp_c,
             cell_modules, temp_modules
           )
           VALUES (
@@ -480,7 +504,8 @@ const insertTelemetryItems = async (items = []) => {
             $94,$95,$96,$97,$98,$99,$100,$101,$102,$103,$104,$105,$106,
             $107,$108,$109,$110,$111,
             $112,
-            $113::jsonb,$114::jsonb
+            $113,$114,
+            $115::jsonb,$116::jsonb
           )
           `,
           values
@@ -614,4 +639,6 @@ const insertTelemetryItems = async (items = []) => {
 module.exports = {
   insertTelemetryItems,
   setSocketIO,
+  LIVE_VALUES_COLUMNS,
+  _helpers: { toInt, toBoundedNum },
 };

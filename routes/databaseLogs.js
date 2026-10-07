@@ -173,6 +173,9 @@ const ALL_COLUMN_DEFS = [
   { key: 'motor_status_word',              label: 'Motor Status Word' },
   { key: 'motor_freq_raw',                 label: 'Motor Frequency Raw' },
   { key: 'motor_total_wattage_w',          label: 'Motor Total Wattage (W)' },
+  // Oil Motor (MCU2)
+  { key: 'oil_motor_speed_rpm',            label: 'Oil Motor Speed (RPM)' },
+  { key: 'oil_motor_temp_c',               label: 'Oil Motor Temperature (°C)' },
   // BTMS
   { key: 'btms_command_mode',              label: 'BTMS Command Mode' },
   { key: 'btms_status_mode',               label: 'BTMS Status Mode' },

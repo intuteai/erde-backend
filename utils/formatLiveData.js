@@ -316,6 +316,10 @@ function formatLiveData(row) {
     // Peripherals
     hydraulic_oil_temp_c: toNumber(r.hydraulic_oil_temp_c),
 
+    // Oil Motor (MCU2)
+    oil_motor_speed_rpm:  toNumber(r.oil_motor_speed_rpm),
+    oil_motor_temp_c:     toNumber(r.oil_motor_temp_c),
+
     // EVCC1 — EV Charging Controller
     evcc1_pwr_stat:               toNumber(r.evcc1_pwr_stat),
     evcc1_socket_stat:            toNumber(r.evcc1_socket_stat),
