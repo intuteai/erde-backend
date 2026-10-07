@@ -3,7 +3,7 @@
 // same code serves a single-window report and a whole-trial comparison.
 const db = require('../config/postgres');
 const { loadBatches } = require('./rawData');
-const { orderSessions, snapshotsAt } = require('./stateAssembler');
+const { orderSessions, forEachWindow } = require('./stateAssembler');
 const { LIVE_KEYS } = require('./buildLiveValues');
 const { KNOWN_CAN_IDS } = require('./decoders');
 const {
@@ -19,6 +19,13 @@ const RECENT_FRAME_MS = 2000;
  * that is loss, not decoding.
  */
 const AFTER_LOSS_MS = 5000;
+/**
+ * The app's snapshot runs slightly behind its own incoming frames (measured on the
+ * first real run: typically 40-200 ms, p95 under 0.75 s). Parity counts a field as
+ * matching if the backend's value equalled the app's at any moment in this window
+ * before the upload. The exact-time figure is reported alongside.
+ */
+const PARITY_WINDOW_MS = 1000;
 
 /** Receive times of the first frame after each sequence gap, ascending. */
 const gapEndTimes = (sessions) => {
@@ -88,6 +95,7 @@ const createAccumulator = () => ({
   rowsCompared: 0,
   rowsWithoutRecentFrames: 0,
   rowsAfterLoss: 0,
+  tallyExact: new ParityTally(),
   rowsBeforeFirstSession: 0,
   // old path (the app's decoded uploads), over the same windows
   old: {
@@ -137,17 +145,17 @@ const collectWindow = async (acc, { vehicle, fromMs, toMs, evccFixed = false, co
 
   // ── parity: rebuilt state at each app upload's tablet time ──
   const { sessions } = orderSessions(allBatches);
-  const states = snapshotsAt(sessions, appRows.map((r) => r.at_ms), { evccFixed });
   const gapEnds = gapEndTimes(sessions);
   let g = 0;
   acc.appRows += appRows.length;
-  states.forEach((state, i) => {
+  forEachWindow(sessions, appRows.map((r) => r.at_ms), PARITY_WINDOW_MS, { evccFixed }, (i, state) => {
     if (!state.live) { acc.rowsBeforeFirstSession += 1; return; }
     if (state.lastFrameAtMs < state.atMs - RECENT_FRAME_MS) { acc.rowsWithoutRecentFrames += 1; return; }
     while (g < gapEnds.length && gapEnds[g] <= state.atMs - AFTER_LOSS_MS) g += 1;
     if (g < gapEnds.length && gapEnds[g] <= state.atMs) { acc.rowsAfterLoss += 1; return; }
     acc.rowsCompared += 1;
-    acc.tally.addRow(state.atMs, appRows[i], state.live, columns);
+    acc.tally.addRowCandidates(state.atMs, appRows[i], state.candidates, columns);
+    acc.tallyExact.addRow(state.atMs, appRows[i], state.live, columns);
     // Size of the app's upload for this row, rebuilt (same fields and values).
     acc.old.uploadJsonBytes += Buffer.byteLength(JSON.stringify({
       ts: Math.round(state.atMs), vehicleIdOrMasterId: vehicle, live: state.live, deviceId: 'VCL000',
@@ -211,6 +219,8 @@ const toReport = (acc, { vehicle, fromMs, toMs, evccFixed, tableBytes }) => {
       rowsAfterLoss: acc.rowsAfterLoss,
       rowsBeforeFirstSession: acc.rowsBeforeFirstSession,
       ...acc.tally.results(),
+      exactMatchRate: acc.tallyExact.results().matchRate,
+      windowMs: PARITY_WINDOW_MS,
     },
   };
 };
@@ -226,5 +236,6 @@ module.exports = {
   tableBytes,
   RECENT_FRAME_MS,
   AFTER_LOSS_MS,
+  PARITY_WINDOW_MS,
   gapEndTimes,
 };

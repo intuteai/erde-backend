@@ -1,6 +1,6 @@
 // raw-can-trial/tests/stateAssembler.test.js
 const {
-  StateAssembler, mergeDecoded, orderSessions, buildShadowSnapshots, snapshotsAt,
+  StateAssembler, mergeDecoded, orderSessions, buildShadowSnapshots, snapshotsAt, forEachWindow,
 } = require('../stateAssembler');
 
 const hex = (s) => Buffer.from(s.replace(/\s/g, ''), 'hex');
@@ -165,5 +165,34 @@ describe('snapshotsAt', () => {
     expect(out[3].lastFrameAtMs).toBe(T0 + 3000);
     expect(out[4].live.soc_percent).toBeNull(); // session B started from empty state
     expect(out[4].live.stack_voltage_v).toBe(750);
+  });
+});
+
+describe('forEachWindow', () => {
+  const sessions = [{
+    sessionId: 'A',
+    frames: [
+      frame(1, T0 + 100, 0x142, SOC_80),
+      frame(2, T0 + 1500, 0x142, SOC_60),
+      frame(3, T0 + 1800, 0x142, SOC_80),
+    ],
+  }];
+
+  it('gives the state at the window start plus the state after each frame in the window', () => {
+    const seen = [];
+    forEachWindow(sessions, [T0 + 2000], 1000, {}, (i, m) => seen.push({ i, m }));
+    expect(seen).toHaveLength(1);
+    const { m } = seen[0];
+    expect(m.candidates.map((c) => c.soc_percent)).toEqual([80, 60, 80]);
+    expect(m.live.soc_percent).toBe(80);
+    expect(m.lastFrameAtMs).toBe(T0 + 1800);
+  });
+
+  it('reports moments before the first session with null state', () => {
+    const seen = [];
+    forEachWindow(sessions, [T0, T0 + 3000], 1000, {}, (i, m) => seen.push(m));
+    expect(seen[0].live).toBeNull();
+    expect(seen[0].candidates).toBeNull();
+    expect(seen[1].candidates.map((c) => c.soc_percent)).toEqual([80]); // no frames in (2000, 3000]
   });
 });

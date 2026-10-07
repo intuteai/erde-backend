@@ -169,6 +169,33 @@ class ParityTally {
     }
   }
 
+  /**
+   * Like addRow(), but a field matches if the stored value equals the rebuilt value
+   * in ANY of the candidate snapshots (states in the moments before the upload).
+   * Mismatch examples show the last candidate, i.e. the state at the upload time.
+   */
+  addRowCandidates(atMs, storedRow, candidates, columns) {
+    const pick = (outcomes) => (outcomes.includes('match') ? 'match'
+      : outcomes.includes('both-null') ? 'both-null' : 'mismatch');
+    const last = candidates[candidates.length - 1];
+
+    for (const [field, meta] of columns) {
+      if (field === 'alarms') {
+        const stored = storedRow.alarms?.faults || {};
+        const flags = new Set(Object.keys(stored));
+        for (const c of candidates) for (const k of Object.keys(c.alarms?.faults || {})) flags.add(k);
+        for (const flag of flags) {
+          const outcome = pick(candidates.map((c) =>
+            compareValue({ dataType: 'boolean' }, stored[flag], c.alarms?.faults?.[flag])));
+          this.add(`alarms.${flag}`, outcome, atMs, stored[flag], last.alarms?.faults?.[flag]);
+        }
+        continue;
+      }
+      const outcome = pick(candidates.map((c) => compareValue(meta, storedRow[field], c[field])));
+      this.add(field, outcome, atMs, storedRow[field], last[field]);
+    }
+  }
+
   /** Fields ordered worst first. matchRate counts only rows where a side had a value. */
   results() {
     const list = [...this.fields.values()].map((f) => {
@@ -222,7 +249,7 @@ const renderMarkdown = (r) => {
   L.push(`| Frames missing (sequence gaps) | ${fmt(lossTotals.missing)} of ${fmt(lossTotals.expected)} expected (${pct(lossTotals.expected ? lossTotals.missing / lossTotals.expected : null)}) |`);
   L.push(`| Tablet to server delay, p95 | ${fmt(r.timing.frameLagMs.p95)} ms (target ≤ 750 ms) |`);
   L.push(`| Frame rate | ${fmt(r.volume.framesPerSecond, 1)} frames/s while active |`);
-  L.push(`| Parity | ${pct(r.parity.matchRate)} of ${fmt(r.parity.compared)} non-empty field comparisons (target ≥ 99.9%) |`);
+  L.push(`| Parity | ${pct(r.parity.matchRate)} of ${fmt(r.parity.compared)} non-empty field comparisons (target ≥ 99.9%)${r.parity.windowMs ? `; exact-time ${pct(r.parity.exactMatchRate)}` : ''} |`);
   L.push('');
 
   L.push('## Loss', '');
@@ -251,7 +278,8 @@ const renderMarkdown = (r) => {
   L.push('');
 
   L.push('## Parity', '');
-  L.push(`Each app upload in \`live_values\` (${fmt(r.parity.appRows)} rows) is compared with the state the backend rebuilds from raw frames at the same tablet time.`);
+  L.push(`Each app upload in \`live_values\` (${fmt(r.parity.appRows)} rows) is compared with the state the backend rebuilds from raw frames` + (r.parity.windowMs ? ` in the ${fmt(r.parity.windowMs)} ms before the upload's tablet time: a field matches if the backend held the app's value at any moment in that window, because the app's snapshot runs slightly behind its own frames.` : ' at the same tablet time.'));
+  if (r.parity.exactMatchRate !== undefined) L.push(`- Exact-time parity (state at the upload's timestamp only): ${pct(r.parity.exactMatchRate)}`);
   L.push(`- Compared: ${fmt(r.parity.rowsCompared)} rows`);
   L.push(`- Not compared, no raw frame in the 2 s before the upload: ${fmt(r.parity.rowsWithoutRecentFrames)} rows (the app uploaded while the raw path delivered nothing, or frames were lost)`);
   if (r.parity.rowsAfterLoss !== undefined) {

@@ -389,3 +389,29 @@ describe('renderMarkdown', () => {
     expect(md).toContain('1, 3, 5, 7, 9, 11, 13, 15, 17, 19 (+2 more) |');
   });
 });
+
+describe('ParityTally.addRowCandidates', () => {
+  const cols = new Map([['soc_percent', { dataType: 'numeric', scale: 2 }], ['alarms', { dataType: 'jsonb', scale: null }]]);
+  const live = (soc, low) => ({ soc_percent: soc, alarms: { faults: { bms_soc_low: low } } });
+
+  it('matches when any candidate equals the stored value, and reports the last candidate otherwise', () => {
+    const t = new ParityTally();
+    t.addRowCandidates(1, { soc_percent: '60.00', alarms: { faults: { bms_soc_low: true } } },
+      [live(80, false), live(60, true), live(70, false)], cols);
+    t.addRowCandidates(2, { soc_percent: '55.00', alarms: { faults: { bms_soc_low: false } } },
+      [live(80, false), live(70, false)], cols);
+    const byField = Object.fromEntries(t.results().fields.map((f) => [f.field, f]));
+    expect(byField.soc_percent.matches).toBe(1);
+    expect(byField.soc_percent.mismatches).toBe(1);
+    expect(byField.soc_percent.examples[0]).toEqual({ atMs: 2, stored: '55.00', rebuilt: 70 });
+    expect(byField['alarms.bms_soc_low'].matches).toBe(2);
+  });
+
+  it('treats a stored null as both-null when some candidate is null', () => {
+    const t = new ParityTally();
+    t.addRowCandidates(1, { soc_percent: null, alarms: { faults: {} } }, [live(null, false), live(80, false)], cols);
+    const f = t.results().fields.find((x) => x.field === 'soc_percent');
+    expect(f.bothNull).toBe(1);
+    expect(f.mismatches).toBe(0);
+  });
+});

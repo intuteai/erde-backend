@@ -182,11 +182,49 @@ const snapshotsAt = (sessions, times, opts = {}) => {
   return out;
 };
 
+/**
+ * Like snapshotsAt(), but also collects every state the app could have uploaded in
+ * the windowMs before each moment: the state at the window start, then the state
+ * after each frame in (t - windowMs, t]. The app's snapshot runs slightly behind its
+ * own incoming frames, so its value may equal any of these. Calls onMoment once per
+ * time instead of returning everything, to keep memory flat.
+ *
+ * onMoment(index, { atMs, live, candidates, lastFrameAtMs }); live and candidates
+ * are null before the first session.
+ */
+const forEachWindow = (sessions, times, windowMs, opts, onMoment) => {
+  const asm = new StateAssembler(opts);
+  let s = -1;
+  let i = 0;
+
+  times.forEach((t, index) => {
+    while (s + 1 < sessions.length && sessions[s + 1].frames[0].receivedAtMs <= t) {
+      s += 1;
+      i = 0;
+      asm.reset();
+    }
+    if (s < 0) {
+      onMoment(index, { atMs: t, live: null, candidates: null, lastFrameAtMs: null });
+      return;
+    }
+    const { frames } = sessions[s];
+    while (i < frames.length && frames[i].receivedAtMs <= t - windowMs) asm.apply(frames[i++]);
+    const candidates = [asm.snapshot(t - windowMs)];
+    while (i < frames.length && frames[i].receivedAtMs <= t) {
+      asm.apply(frames[i]);
+      candidates.push(asm.snapshot(frames[i].receivedAtMs));
+      i += 1;
+    }
+    onMoment(index, { atMs: t, live: asm.snapshot(t), candidates, lastFrameAtMs: asm.lastFrameAtMs });
+  });
+};
+
 module.exports = {
   StateAssembler,
   mergeDecoded,
   orderSessions,
   buildShadowSnapshots,
   snapshotsAt,
+  forEachWindow,
   SNAPSHOT_INTERVAL_MS,
 };

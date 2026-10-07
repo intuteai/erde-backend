@@ -80,6 +80,7 @@ const buildComparison = (acc, { vehicle, fromMs, toMs, evccFixed }) => {
     parity: {
       rowsCompared: acc.rowsCompared,
       rowsAfterLoss: acc.rowsAfterLoss || 0,
+      exactMatchRate: acc.tallyExact ? acc.tallyExact.results().matchRate : null,
       compared: parity.compared,
       matchRate: parity.matchRate,
       worstFields: parity.fields.filter((f) => f.compared > 0 && f.mismatches > 0).slice(0, 10),
@@ -208,7 +209,7 @@ const renderComparison = (c) => {
   L.push('');
 
   L.push('## Parity', '');
-  L.push(`${pct(c.parity.matchRate, 3)} of ${num(c.parity.compared)} non-empty field comparisons matched, over ${num(c.parity.rowsCompared)} app uploads.` + (c.parity.rowsAfterLoss ? ` ${num(c.parity.rowsAfterLoss)} uploads within 5 s after lost frames were not compared, since loss rather than decoding would explain any difference.` : ''), '');
+  L.push(`${pct(c.parity.matchRate, 3)} of ${num(c.parity.compared)} non-empty field comparisons matched, over ${num(c.parity.rowsCompared)} app uploads, allowing for the app's snapshot running up to 1 s behind its own frames (exact-time: ${pct(c.parity.exactMatchRate, 3)}).` + (c.parity.rowsAfterLoss ? ` ${num(c.parity.rowsAfterLoss)} uploads within 5 s after lost frames were not compared, since loss rather than decoding would explain any difference.` : ''), '');
   if (c.parity.worstFields.length) {
     L.push('| Field | Match rate | Mismatches | Example (app → backend) |', '|---|---|---|---|');
     for (const f of c.parity.worstFields) {
