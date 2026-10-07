@@ -211,7 +211,14 @@ router.get(
     req.on('close', () => {
       clearInterval(interval);
       clearInterval(heartbeat);
-      liveCache.delete(cacheKey);
+      // Deliberately not liveCache.delete(cacheKey) — this key is shared
+      // across every concurrent viewer of this same vehicle (e.g. two tabs
+      // both open on /vehicle/:id/track), same reasoning as the fleet-wide
+      // stream above: one connection closing must not evict data another
+      // still-open connection relies on. It used to be deleted here, which
+      // forced any other open viewer's next poll tick into an unnecessary
+      // extra DB query — harmless but pointless; the TTL (via
+      // cleanupLiveCache) already reclaims it once nothing needs it.
       logger.info(`🔴 Location SSE disconnected → vehicle=${id}`);
     });
   }

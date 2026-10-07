@@ -37,6 +37,16 @@ const app = express();
 /* =========================
    CORS CONFIG
 ========================= */
+// CORS_ALLOWED_ORIGINS in .env was previously defined but never read here —
+// the allowlist was a hardcoded array, so entries like the production
+// .env's localhost:8080 (VPN tunnel access) had no actual effect. Merging
+// it in, additively, so the env var does what its name says without
+// dropping any of the origins already known to work below.
+const envOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:5173',
@@ -44,6 +54,7 @@ const allowedOrigins = [
   'http://127.0.0.1:5173',
   'http://analytics.erdeenergy.in',
   'https://analytics.erdeenergy.in',
+  ...envOrigins,
 ];
 
 app.use(

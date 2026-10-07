@@ -288,6 +288,270 @@ router.get(
 );
 
 /* ============================================================
+   GET /api/vehicles/locations
+   Fleet-wide snapshot: latest known location for every vehicle
+   the caller can see (admin: all; customer: own only — same
+   scoping pattern as /api/vehicle-master/admin-summary vs /my).
+   Vehicles with no location row are simply omitted.
+
+   MUST be defined before /:id (and /:id/stream, further below)
+   — /:id is a single-segment route that would otherwise match
+   the literal path "locations" as id="locations", and
+   /:id/stream would match "locations/stream" the same way.
+   This is the same reason /analytics/batch above is defined
+   before /:id: Express checks routes in registration order,
+   not by literal-vs-param specificity.
+============================================================ */
+router.get(
+  '/locations',
+  authenticateToken,
+  checkPermission('live_view', 'read'),
+  liveRateLimiter,
+  async (req, res) => {
+    const isCustomer = req.user.role === 'customer';
+
+    try {
+      // LATERAL join — one index seek per vehicle via idx_vehicle_location_latest
+      // (vehicle_master_id, recorded_at DESC), same pattern as /analytics/batch
+      // above. A DISTINCT ON (vl.vehicle_master_id) ... ORDER BY vl.vehicle_master_id
+      // formulation was tried first and measured ~4.3s against 9M+ rows in
+      // vehicle_location, because Postgres has to consider the whole table to
+      // establish DISTINCT ON group order; this LATERAL form starts from the
+      // small vehicle_master set instead and measured ~270ms for the same result.
+      // last_seen comes from vehicle_latest_snapshot — the same O(1) source
+      // /admin-summary and /my use for their status pill — NOT from
+      // vehicle_location.recorded_at. recorded_at is a GPS ping timestamp;
+      // last_seen reflects whether the vehicle is actively sending telemetry
+      // to live_values, which is what "live" means for the rest of the
+      // dashboard, so the fleet map's marker color is now driven by the
+      // same signal instead of GPS-ping recency.
+      const result = await db.query(
+        `
+        SELECT
+          vm.vehicle_master_id,
+          vm.vehicle_reg_no,
+          cm.company_name,
+          vt.make,
+          vt.model,
+          vls.last_seen,
+          vls.total_running_hrs,
+          lv.soc_percent,
+          loc.lat,
+          loc.lon,
+          loc.recorded_at,
+          loc.heading_deg
+        FROM vehicle_master vm
+        JOIN customer_master cm     ON vm.customer_id = cm.customer_id
+        JOIN vehicle_type_master vt ON vm.vtype_id    = vt.vtype_id
+        LEFT JOIN vehicle_latest_snapshot vls ON vls.vehicle_master_id = vm.vehicle_master_id
+        LEFT JOIN LATERAL (
+          SELECT soc_percent
+          FROM live_values
+          WHERE vehicle_master_id = vm.vehicle_master_id
+          ORDER BY recorded_at DESC
+          LIMIT 1
+        ) lv ON true
+        JOIN LATERAL (
+          SELECT lat, lon, recorded_at, heading_deg
+          FROM vehicle_location
+          WHERE vehicle_master_id = vm.vehicle_master_id
+          ORDER BY recorded_at DESC
+          LIMIT 1
+        ) loc ON true
+        WHERE ($1::int IS NULL OR cm.user_id = $1)
+        `,
+        [isCustomer ? req.user.user_id : null]
+      );
+
+      const data = result.rows.map((row) => ({
+        vehicle_master_id: row.vehicle_master_id,
+        vehicle_no: row.vehicle_reg_no || '—',
+        vehicle_type: `${row.make || ''} ${row.model || ''}`.trim() || '—',
+        customer: row.company_name || '—',
+        lat: Number(row.lat),
+        lon: Number(row.lon),
+        recorded_at: row.recorded_at,
+        last_seen: row.last_seen,
+        heading_deg: row.heading_deg != null ? Number(row.heading_deg) : null,
+        soc_percent: toNumber(row.soc_percent),
+        total_hours: toNumber(intervalToHours(row.total_running_hrs)),
+      }));
+
+      res.json(data);
+    } catch (err) {
+      logger.error(`GET /vehicles/locations error: ${err.message}`);
+      res.status(500).json({ error: 'Server error' });
+    }
+  }
+);
+
+/* ============================================================
+   GET /api/vehicles/locations/stream
+   Fleet-wide SSE: pushes one event per vehicle whenever its
+   position OR its live/offline status changes. Polls a single
+   LATERAL-join query (one query for the whole fleet, not one
+   per vehicle) and only emits for vehicles whose recorded_at
+   (GPS ping) or last_seen (telemetry ping) actually advanced
+   since the last poll, tracked per-connection in `lastSent`.
+
+   The poll result itself is cached in the shared `liveCache`
+   (the same cache /:id/live and /:id/stream below use), keyed
+   by scope (all admins share one key; each customer has their
+   own). Without this, every open browser tab/reconnect would
+   run its own independent multi-join fleet query twice a second
+   — this collapses concurrent viewers of the same scope onto
+   one query.
+
+   Unlike the per-vehicle routes below, this cache entry is NOT
+   deleted on connection close: the key is shared across
+   potentially many concurrent connections (e.g. several admins
+   with the fleet map open), so one connection closing must not
+   evict data another connection still relies on.
+   cleanupLiveCache() reaps it via TTL once nothing is polling it.
+
+   MUST be defined before /:id/stream for the same reason as
+   /locations above — "locations/stream" would otherwise match
+   /:id/stream with id="locations".
+============================================================ */
+const FLEET_POLL_INTERVAL_MS = 2000;
+
+router.get(
+  '/locations/stream',
+  authenticateToken,
+  checkPermission('live_view', 'read'),
+  liveRateLimiter,
+  async (req, res) => {
+    const user = req.user;
+    const isCustomer = user.role === 'customer';
+    const cacheKey = `fleet_locations:${isCustomer ? user.user_id : 'admin'}`;
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders();
+
+    logger.info(`🟢 Fleet location SSE connected → user=${user.email}`);
+
+    // vehicle_master_id -> last-sent recorded_at (ISO string), scoped to
+    // this connection only — each viewer gets their own "what have I
+    // already sent" bookkeeping even though the underlying DB rows
+    // (via liveCache above) are shared across same-scope connections.
+    const lastSent = new Map();
+
+    const fetchLocationRows = async () => {
+      // Same LATERAL-join pattern as /locations above — one index seek per
+      // vehicle instead of a DISTINCT ON scan across the whole location table.
+      // last_seen (from vehicle_latest_snapshot) drives live/offline color,
+      // same source as the dashboard's status pill — see comment on /locations.
+      const result = await db.query(
+        `
+        SELECT
+          vm.vehicle_master_id,
+          vls.last_seen,
+          vls.total_running_hrs,
+          lv.soc_percent,
+          loc.lat,
+          loc.lon,
+          loc.recorded_at,
+          loc.heading_deg
+        FROM vehicle_master vm
+        JOIN customer_master cm ON vm.customer_id = cm.customer_id
+        LEFT JOIN vehicle_latest_snapshot vls ON vls.vehicle_master_id = vm.vehicle_master_id
+        LEFT JOIN LATERAL (
+          SELECT soc_percent
+          FROM live_values
+          WHERE vehicle_master_id = vm.vehicle_master_id
+          ORDER BY recorded_at DESC
+          LIMIT 1
+        ) lv ON true
+        JOIN LATERAL (
+          SELECT lat, lon, recorded_at, heading_deg
+          FROM vehicle_location
+          WHERE vehicle_master_id = vm.vehicle_master_id
+          ORDER BY recorded_at DESC
+          LIMIT 1
+        ) loc ON true
+        WHERE ($1::int IS NULL OR cm.user_id = $1)
+        `,
+        [isCustomer ? user.user_id : null]
+      );
+      return result.rows;
+    };
+
+    const poll = async () => {
+      if (res.writableEnded) return;
+
+      try {
+        cleanupLiveCache();
+        const now = Date.now();
+        const entry = liveCache.get(cacheKey);
+
+        let rows;
+        if (entry?.data && now - entry.ts < FLEET_POLL_INTERVAL_MS) {
+          rows = entry.data;
+        } else if (entry?.inflight) {
+          rows = await entry.inflight;
+        } else {
+          const inflight = fetchLocationRows();
+          liveCache.set(cacheKey, { ts: now, inflight });
+          rows = await inflight;
+          liveCache.set(cacheKey, { ts: Date.now(), data: rows });
+        }
+
+        for (const row of rows) {
+          // Fingerprint on BOTH timestamps, not just recorded_at: a vehicle
+          // can keep sending telemetry (last_seen advancing, changing its
+          // live/offline color) while parked at the same GPS fix (recorded_at
+          // unchanged) — that must still be re-sent so the client's color
+          // doesn't go stale waiting for a position change that isn't coming.
+          const recordedAtIso = row.recorded_at ? new Date(row.recorded_at).toISOString() : null;
+          const lastSeenIso = row.last_seen ? new Date(row.last_seen).toISOString() : null;
+          const fingerprint = `${recordedAtIso}|${lastSeenIso}|${row.soc_percent}|${row.total_running_hrs}`;
+
+          if (lastSent.get(row.vehicle_master_id) === fingerprint) continue;
+          lastSent.set(row.vehicle_master_id, fingerprint);
+
+          const payload = {
+            vehicle_master_id: row.vehicle_master_id,
+            lat: Number(row.lat),
+            lon: Number(row.lon),
+            recorded_at: row.recorded_at,
+            last_seen: row.last_seen,
+            heading_deg: row.heading_deg != null ? Number(row.heading_deg) : null,
+            soc_percent: toNumber(row.soc_percent),
+            total_hours: toNumber(intervalToHours(row.total_running_hrs)),
+          };
+
+          if (!res.writableEnded) {
+            res.write(`data: ${JSON.stringify(payload)}\n\n`);
+          }
+        }
+      } catch (err) {
+        logger.error(`Fleet location SSE poll error: ${err.message}`);
+      }
+    };
+
+    await poll(); // send current state immediately on connect
+
+    const interval = setInterval(poll, FLEET_POLL_INTERVAL_MS);
+
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded) res.write(':\n\n');
+    }, 15000);
+
+    req.on('close', () => {
+      clearInterval(interval);
+      clearInterval(heartbeat);
+      // Deliberately not liveCache.delete(cacheKey) here — see comment above.
+      logger.info(`🔴 Fleet location SSE disconnected → user=${user.email}`);
+    });
+  }
+);
+
+/* ============================================================
    GET /api/vehicles/:id — Vehicle summary + latest ODO/kWh
 ============================================================ */
 router.get(
@@ -371,19 +635,19 @@ router.get(
     const now        = Date.now();
 
     try {
-      // --- Fast path: serve from cache ---
-      let entry = liveCache.get(cacheKey);
-      if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
-        return res.json(entry.data);
-      }
-
-      // --- Ownership check ---
+      // --- Ownership check, always, before touching the cache ---
+      // cacheKey is keyed only by vehicle id, shared across every user who
+      // requests this vehicle — serving a cache hit before checking
+      // ownership would let any authenticated user who guesses/edits a
+      // vehicle id in the URL read another customer's real live data for
+      // up to LIVE_CACHE_TTL_MS after someone with real access warmed the
+      // cache. Every sibling endpoint (timeseries/analytics/activity/stream)
+      // already checks ownership unconditionally; this one must too.
       const allowed = await checkVehicleAccess(id, req.user.user_id, isCustomer);
       if (!allowed) return res.json({});
 
-      // --- Re-check cache: another concurrent request may have populated it
-      //     while we were waiting on the ownership query ---
-      entry = liveCache.get(cacheKey);
+      // --- Fast path: serve from cache ---
+      let entry = liveCache.get(cacheKey);
       if (entry?.data && now - entry.ts < LIVE_CACHE_TTL_MS) {
         return res.json(entry.data);
       }

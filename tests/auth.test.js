@@ -44,7 +44,10 @@ describe('POST /api/auth/login', () => {
 
     expect(refreshCookie).toBeDefined();
     expect(refreshCookie).toMatch(/HttpOnly/i);
-    expect(refreshCookie).toMatch(/Path=\/api\/auth/i);
+    // routes/auth.js deliberately sets Path=/ (and actively clears the old
+    // /api and /api/auth cookie paths as legacy cleanup) — this assertion
+    // was still checking the pre-migration path.
+    expect(refreshCookie).toMatch(/Path=\//i);
   });
 });
 
