@@ -210,3 +210,93 @@ describe('bodies compressed twice (React Native on Android)', () => {
     expect(res.body.accepted).toBe(false);
   });
 });
+
+describe('compression is detected from the bytes, not the header', () => {
+  const send = async (app, payload, headers) => {
+    const server = app.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.address().port}${PATH}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': KEY, ...headers },
+        body: payload,
+      });
+      return { status: res.status, body: await res.json() };
+    } finally {
+      server.close();
+    }
+  };
+  const json = () => JSON.stringify(body());
+
+  it('accepts plain JSON that is labelled gzip', async () => {
+    const res = await send(buildApp(), json(), { 'content-encoding': 'gzip' });
+    expect(res.status).toBe(202);
+  });
+
+  it('accepts gzip that is not labelled', async () => {
+    const res = await send(buildApp(), zlib.gzipSync(json()), {});
+    expect(res.status).toBe(202);
+  });
+
+  it('accepts gzip inside gzip without a label', async () => {
+    const res = await send(buildApp(), zlib.gzipSync(zlib.gzipSync(json())), {});
+    expect(res.status).toBe(202);
+  });
+
+  it('rejects three layers of gzip', async () => {
+    const res = await send(buildApp(), zlib.gzipSync(zlib.gzipSync(zlib.gzipSync(json()))), { 'content-encoding': 'gzip' });
+    expect(res.status).toBe(400);
+    expect(store.insertBatch).not.toHaveBeenCalled();
+  });
+
+  it('rejects a body that is not sent as application/json', async () => {
+    const res = await send(buildApp(), json(), { 'content-type': 'text/plain' });
+    expect(res.status).toBe(400);
+    expect(res.body.accepted).toBe(false);
+    expect(store.insertBatch).not.toHaveBeenCalled();
+  });
+});
+
+describe('client stats header', () => {
+  const logger = require('../../utils/logger');
+
+  const withFreshLogWindow = async (offsetMs, fn) => {
+    const info = jest.spyOn(logger, 'info').mockImplementation(() => {});
+    const realNow = Date.now;
+    Date.now = () => realNow() + offsetMs;
+    try {
+      await fn(() => info.mock.calls.filter((c) => c[0] === '[raw-can] Client stats'));
+    } finally {
+      Date.now = realNow;
+      info.mockRestore();
+    }
+  };
+
+  it('logs the tablet\'s reported timings with the batch, at most once per window', async () => {
+    await withFreshLogWindow(3 * 60 * 60_000, async (statsLogs) => {
+      const app = buildApp();
+      const stats = JSON.stringify({ queuedBatches: 12, gzipMs: 40, requestMs: 310 });
+      const post = () => request(app).post(PATH).set('x-api-key', KEY).set('x-raw-can-stats', stats).send(body());
+      expect((await post()).status).toBe(202);
+      expect((await post()).status).toBe(202);
+
+      expect(statsLogs()).toHaveLength(1);
+      expect(statsLogs()[0][1]).toMatchObject({
+        client: { queuedBatches: 12, gzipMs: 40, requestMs: 310 },
+        frames: 1,
+        lastSequence: 1,
+      });
+      expect(typeof statsLogs()[0][1].sinceFirstFrameS).toBe('number');
+    });
+  });
+
+  it('ignores a stats header that is not a JSON object, and still stores the batch', async () => {
+    await withFreshLogWindow(5 * 60 * 60_000, async (statsLogs) => {
+      const app = buildApp();
+      for (const bad of ['not json', '[1,2]', '"text"', `{"a":"${'x'.repeat(2100)}"}`]) {
+        const res = await request(app).post(PATH).set('x-api-key', KEY).set('x-raw-can-stats', bad).send(body());
+        expect(res.status).toBe(202);
+      }
+      expect(statsLogs()).toHaveLength(0);
+    });
+  });
+});

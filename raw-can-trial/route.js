@@ -6,8 +6,35 @@ const config = require('./config');
 const { validateBatch } = require('./validateBatch');
 const { insertBatch } = require('./store');
 const logger = require('../utils/logger');
+const { logThrottled } = require('./logThrottle');
 
 const router = express.Router();
+
+const MAX_STATS_HEADER = 2000;
+
+/**
+ * The app can report its own upload timings and queue state in an
+ * x-raw-can-stats header (JSON). Logged at most once per window, with what the
+ * server can see of the same batch, so the tablet can be diagnosed from here.
+ */
+const logClientStats = (req, batch, receivedAtMs) => {
+  const header = req.headers['x-raw-can-stats'];
+  if (typeof header !== 'string' || !header || header.length > MAX_STATS_HEADER) return;
+  let client;
+  try {
+    client = JSON.parse(header);
+  } catch {
+    return;
+  }
+  if (client === null || typeof client !== 'object' || Array.isArray(client)) return;
+  logThrottled('client-stats', 'info', '[raw-can] Client stats', {
+    client,
+    frames: batch.frames.length,
+    lastSequence: batch.lastSequence,
+    sinceBatchQueuedS: Math.round((receivedAtMs - batch.sentAtMs) / 100) / 10,
+    sinceFirstFrameS: Math.round((receivedAtMs - Number(batch.frames[0].receivedAtMs)) / 100) / 10,
+  });
+};
 
 const keyMatches = (sent, expected) => {
   if (!expected || typeof sent !== 'string') return false;
@@ -45,6 +72,7 @@ router.post('/v1', async (req, res) => {
 
   try {
     const stored = await insertBatch(batch, receivedAtMs);
+    logClientStats(req, batch, receivedAtMs);
 
     const ack = {
       accepted: true,
