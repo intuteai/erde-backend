@@ -45,7 +45,7 @@ const postGzip = async (app, payload) => {
         'content-encoding': 'gzip',
         'x-api-key': KEY,
       },
-      body: zlib.gzipSync(JSON.stringify(payload)),
+      body: Buffer.isBuffer(payload) ? payload : zlib.gzipSync(JSON.stringify(payload)),
     });
     return { status: res.status, body: await res.json() };
   } finally {
@@ -137,5 +137,76 @@ describe('mount(app)', () => {
       .send({ padding: 'x'.repeat(200 * 1024) });
     expect(res.status).toBe(200);
     expect(res.body.size).toBeGreaterThan(200 * 1024);
+  });
+});
+
+describe('logging of rejected request bodies', () => {
+  const logger = require('../../utils/logger');
+
+  it('logs a body the parser rejects, with its reason and encoding, at most once per window', async () => {
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const realNow = Date.now;
+    let now = realNow() + 10 * 60_000; // a fresh logging window
+    Date.now = () => now;
+    try {
+      const app = buildApp();
+      const sendBad = () => request(app)
+        .post(PATH)
+        .set('x-api-key', KEY)
+        .set('Content-Type', 'application/json')
+        .set('Content-Encoding', 'gzip')
+        .send('this is not gzip data');
+
+      expect((await sendBad()).status).toBe(400);
+      expect((await sendBad()).status).toBe(400);
+      const bodyLogs = () => warn.mock.calls.filter((c) => c[0] === '[raw-can] Request body rejected');
+      expect(bodyLogs()).toHaveLength(1);
+      // notLoggedSinceLast may include rejections from earlier tests in this file
+      expect(bodyLogs()[0][1]).toMatchObject({ status: 400, contentEncoding: 'gzip' });
+
+      now += 31_000;
+      expect((await sendBad()).status).toBe(400);
+      expect(bodyLogs()).toHaveLength(2);
+      expect(bodyLogs()[1][1].notLoggedSinceLast).toBe(1);
+    } finally {
+      Date.now = realNow;
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('bodies compressed twice (React Native on Android)', () => {
+  it('unwraps a double-gzipped batch and stores it', async () => {
+    const twice = zlib.gzipSync(zlib.gzipSync(JSON.stringify(body())));
+    const res = await postGzip(buildApp(), twice);
+    expect(res.status).toBe(202);
+    expect(store.insertBatch).toHaveBeenCalledTimes(1);
+    expect(store.insertBatch.mock.calls[0][0].frames).toHaveLength(1);
+  });
+
+  it('still rejects a compressed body that is not JSON, and logs what it contained', async () => {
+    const logger = require('../../utils/logger');
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const realNow = Date.now;
+    Date.now = () => realNow() + 60 * 60_000; // a fresh logging window
+    try {
+      const res = await postGzip(buildApp(), zlib.gzipSync('[object ArrayBuffer]'));
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({ accepted: false, reason: 'entity.parse.failed' });
+      const logged = warn.mock.calls.find((c) => c[0] === '[raw-can] Request body rejected');
+      expect(logged[1].bodyPreview).toBe(Buffer.from('[object ArrayBuffer]').toString('hex'));
+      expect(store.insertBatch).not.toHaveBeenCalled();
+    } finally {
+      Date.now = realNow;
+      warn.mockRestore();
+    }
+  });
+
+  it('rejects a double-gzipped body that unwraps to more than 128 KiB', async () => {
+    const big = body();
+    big.padding = 'x'.repeat(129 * 1024);
+    const res = await postGzip(buildApp(), zlib.gzipSync(zlib.gzipSync(JSON.stringify(big))));
+    expect(res.status).toBe(413);
+    expect(res.body.accepted).toBe(false);
   });
 });
