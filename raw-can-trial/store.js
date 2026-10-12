@@ -24,14 +24,18 @@ const insertBatch = async (batch, receivedAtMs) => {
       $1, $2, $3, $4,
       $5, $6, $7, $8,
       to_timestamp($9 / 1000.0),
-      EXISTS (
-        SELECT 1 FROM raw_can_batches
+      -- Overlap check via the (device_id, session_id, first_sequence) index: only the
+      -- stored batch starting closest below this batch's end can overlap it. Checking
+      -- every batch of the session instead scanned the whole table on each insert.
+      COALESCE((
+        SELECT last_sequence >= $5 FROM raw_can_batches
         WHERE device_id = $3
           AND session_id = $4
           AND first_sequence <= $6
-          AND last_sequence  >= $5
           AND batch_id <> $1
-      ),
+        ORDER BY first_sequence DESC
+        LIMIT 1
+      ), false),
       $10::jsonb
     )
     ON CONFLICT (batch_id) DO NOTHING

@@ -232,13 +232,13 @@ describe('compression is detected from the bytes, not the header', () => {
     expect(res.status).toBe(202);
   });
 
-  it('accepts gzip that is not labelled', async () => {
-    const res = await send(buildApp(), zlib.gzipSync(json()), {});
+  it('accepts gzip that is not labelled, from a build that reports stats', async () => {
+    const res = await send(buildApp(), zlib.gzipSync(json()), { 'x-raw-can-stats': '{}' });
     expect(res.status).toBe(202);
   });
 
-  it('accepts gzip inside gzip without a label', async () => {
-    const res = await send(buildApp(), zlib.gzipSync(zlib.gzipSync(json())), {});
+  it('accepts gzip inside gzip without a label, from a build that reports stats', async () => {
+    const res = await send(buildApp(), zlib.gzipSync(zlib.gzipSync(json())), { 'x-raw-can-stats': '{}' });
     expect(res.status).toBe(202);
   });
 
@@ -246,6 +246,17 @@ describe('compression is detected from the bytes, not the header', () => {
     const res = await send(buildApp(), zlib.gzipSync(zlib.gzipSync(zlib.gzipSync(json()))), { 'content-encoding': 'gzip' });
     expect(res.status).toBe(400);
     expect(store.insertBatch).not.toHaveBeenCalled();
+  });
+
+  it('tells the build that compresses in JavaScript to stop (403), without storing', async () => {
+    const res = await send(buildApp(), zlib.gzipSync(json()), {});
+    expect(res.status).toBe(403);
+    expect(store.insertBatch).not.toHaveBeenCalled();
+  });
+
+  it('answers 401, not 403, when that build sends a wrong key', async () => {
+    const res = await send(buildApp(), zlib.gzipSync(json()), { 'x-api-key': 'wrong' });
+    expect(res.status).toBe(401);
   });
 
   it('rejects a body that is not sent as application/json', async () => {

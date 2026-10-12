@@ -55,6 +55,18 @@ router.post('/v1', async (req, res) => {
     return res.status(401).json({ error: 'Invalid API key' });
   }
 
+  // The app build installed 9 Oct 2026 compresses every batch in JavaScript,
+  // which freezes the tablet's UI thread and loses most frames. 403 makes that
+  // build stop capturing until the app is restarted. Later builds leave the
+  // compression to Android and always send x-raw-can-stats, so they pass.
+  if (req.rawCanSelfCompressed && !req.headers['x-raw-can-stats']) {
+    logThrottled('unsupported-build', 'warn', '[raw-can] App build that compresses in JavaScript; told to stop', {
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    return res.status(403).json({ error: 'This app build is not supported; update the app' });
+  }
+
   const result = validateBatch(req.body, req.headers);
   if (!result.ok) {
     logger.warn('[raw-can] Batch rejected', { reason: result.reason, ip: req.ip });

@@ -31,7 +31,7 @@ const bodyError = (status, type, message, buf) => {
 /**
  * Collects the request body as received, without interpreting Content-Encoding.
  * The trial reads the body itself (instead of express.json) because the tablet's
- * networking layer does not reliably match the header to what it sends.
+ * networking layer can drop or add the header independently of the body.
  */
 const readBody = (req, res, next) => {
   const type = String(req.headers['content-type'] || '').toLowerCase();
@@ -70,8 +70,9 @@ const readBody = (req, res, next) => {
 /**
  * Turns the collected bytes into req.body. The body is accepted whether it is
  * plain JSON, gzip, or gzip inside gzip: compression is detected from the bytes,
- * not from the Content-Encoding header. (React Native on Android was found to
- * compress an already-compressed body again when the header says gzip.)
+ * not from the Content-Encoding header. React Native on Android removes that
+ * header when the body is binary, so a batch the app compressed itself arrives
+ * as gzip with no label (9-12 Oct 2026: every such batch was rejected).
  */
 const parseBody = (req, res, next) => {
   let buf = req.rawBody;
@@ -92,6 +93,8 @@ const parseBody = (req, res, next) => {
   }
 
   const labelledGzip = /gzip/i.test(String(req.headers['content-encoding'] || ''));
+  // Gzip with no label means the app compressed the batch in JavaScript.
+  req.rawCanSelfCompressed = layers > 0 && !labelledGzip;
   if (layers !== (labelledGzip ? 1 : 0)) {
     logThrottled(`gzip-layers-${layers}-${labelledGzip}`, 'warn', '[raw-can] Body compression did not match its Content-Encoding header; accepted', {
       gzipLayers: layers,
