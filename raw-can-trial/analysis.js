@@ -8,6 +8,13 @@ const EXCLUDED_FIELDS = Object.freeze([
   'total_running_hrs', 'last_trip_hrs', 'total_kwh_consumed', 'last_trip_kwh',
 ]);
 
+/**
+ * Target for the 95th percentile of tablet-to-server delay. The plan's 750 ms was
+ * raised to 2 s on 13 Oct 2026: the app saves frames every 0.5 s and the round trip
+ * over the mobile link is about 0.45 s, and the current dashboard refreshes every 2 s.
+ */
+const MAX_LAG_P95_MS = 2000;
+
 const NUMERIC_TYPES = new Set(['numeric', 'integer', 'smallint', 'bigint', 'real', 'double precision']);
 
 // ─────────────────────────── statistics ───────────────────────────
@@ -247,7 +254,7 @@ const renderMarkdown = (r) => {
   L.push(`| Batches stored | ${fmt(r.ingest.batches)} (${fmt(r.ingest.overlapBatches)} flagged as overlapping) |`);
   L.push(`| Frames stored | ${fmt(r.ingest.frames)} in ${fmt(r.loss.length)} session(s); ${fmt(r.ingest.duplicateFrames)} duplicate frames dropped |`);
   L.push(`| Frames missing (sequence gaps) | ${fmt(lossTotals.missing)} of ${fmt(lossTotals.expected)} expected (${pct(lossTotals.expected ? lossTotals.missing / lossTotals.expected : null)}) |`);
-  L.push(`| Tablet to server delay, p95 | ${fmt(r.timing.frameLagMs.p95)} ms (target ≤ 750 ms) |`);
+  L.push(`| Tablet to server delay, p95 | ${fmt(r.timing.frameLagMs.p95)} ms (target ≤ ${fmt(MAX_LAG_P95_MS)} ms) |`);
   L.push(`| Frame rate | ${fmt(r.volume.framesPerSecond, 1)} frames/s while active |`);
   L.push(`| Parity | ${pct(r.parity.matchRate)} of ${fmt(r.parity.compared)} non-empty field comparisons (target ≥ 99.9%)${r.parity.windowMs ? `; exact-time ${pct(r.parity.exactMatchRate)}` : ''} |`);
   L.push('');
@@ -309,6 +316,7 @@ const renderMarkdown = (r) => {
 
 module.exports = {
   EXCLUDED_FIELDS,
+  MAX_LAG_P95_MS,
   percentile,
   summarize,
   lossBySession,

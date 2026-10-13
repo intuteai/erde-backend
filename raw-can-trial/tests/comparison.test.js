@@ -235,7 +235,7 @@ describe('evaluateTargets and verdict', () => {
     const c = buildComparison(passingAcc(), META);
     expect(c.activeHours).toBe(10);
     expect(c.newPath.missingRate).toBe(0.001);
-    expect(c.newPath.lagP95Ms).toBe(750);
+    expect(c.newPath.lagP95Ms).toBe(2000);
     expect(c.parity.matchRate).toBe(0.999);
     expect(c.targets.every((t) => t.pass === true)).toBe(true);
     expect(c.verdict).toEqual({
@@ -301,7 +301,7 @@ describe('evaluateTargets and verdict', () => {
   });
 
   test('latency failing (with parity) suggests revising the transport', () => {
-    const c = buildComparison(passingAcc({ frameLag: lagWithP95(751), tally: tallyWith(10, 10) }), META);
+    const c = buildComparison(passingAcc({ frameLag: lagWithP95(2001), tally: tallyWith(10, 10) }), META);
     expect(passOf(c)['Tablet → server delay p95 (new path)']).toBe(false);
     expect(c.verdict.decision).toBe('Revise the transport, or drop');
     expect(c.verdict.reasons[0]).toBe('Failing: Tablet → server delay p95 (new path), Decoding parity with the app.');
@@ -319,7 +319,7 @@ describe('renderComparison', () => {
     expect(md).toContain('**Adopt is supported by the data.**');
     expect(md).toContain('| Trial coverage | ≥ 10 active hours | 10.0 h | Pass |');
     expect(md).toContain('| Frames lost (new path) | ≤ 0.1% | 0.100% | Pass |');
-    expect(md).toContain('| Tablet → server delay p95 (new path) | ≤ 750 ms | 750 ms | Pass |');
+    expect(md).toContain('| Tablet → server delay p95 (new path) | ≤ 2,000 ms | 2,000 ms | Pass |');
     expect(md).not.toContain('**Fail**');
   });
 
@@ -347,7 +347,7 @@ describe('renderComparison', () => {
     const md = renderComparison(buildComparison(makeAcc(), META));
     expect(md).not.toMatch(/undefined|NaN|null/);
     expect(md).toContain('| Frames lost (new path) | ≤ 0.1% | – | – |');
-    expect(md).toContain('| Tablet → server delay p95 (new path) | ≤ 750 ms | – | – |');
+    expect(md).toContain('| Tablet → server delay p95 (new path) | ≤ 2,000 ms | – | – |');
     expect(md).toContain('| Decoding parity with the app | ≥ 99.9% | – | – |');
     expect(md).toContain('| Trial coverage | ≥ 10 active hours | 0.0 h | **Fail** |');
     expect(md).toContain('| Delay to server | Not measurable | p50 – ms, p95 – ms |');

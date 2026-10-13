@@ -1,7 +1,7 @@
 // raw-can-trial/comparison.js
 // Old path (app decodes, uploads snapshots) vs new path (raw CAN, backend decodes):
 // the pure parts of the whole-trial comparison. No database access here.
-const { percentile } = require('./analysis');
+const { percentile, MAX_LAG_P95_MS } = require('./analysis');
 
 /** Frames further apart than this split the vehicle's activity into separate segments. */
 const SEGMENT_GAP_MS = 10_000;
@@ -9,7 +9,7 @@ const SEGMENT_GAP_MS = 10_000;
 /** Targets from the trial plan. */
 const TARGETS = Object.freeze({
   maxMissingRate: 0.001, // "no unexplained sequence gaps"; 0.1% allows for a dropped connection or two
-  maxLagP95Ms: 750,
+  maxLagP95Ms: MAX_LAG_P95_MS,
   minParity: 0.999,
   minActiveHours: 10,
 });
@@ -109,7 +109,7 @@ const evaluateTargets = (c) => [
   },
   {
     name: 'Tablet → server delay p95 (new path)',
-    target: `≤ ${TARGETS.maxLagP95Ms} ms`,
+    target: `≤ ${TARGETS.maxLagP95Ms.toLocaleString('en-US')} ms`,
     value: c.newPath.lagP95Ms,
     unit: 'ms',
     pass: c.newPath.lagP95Ms === null ? null : c.newPath.lagP95Ms <= TARGETS.maxLagP95Ms,

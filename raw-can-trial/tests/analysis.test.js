@@ -335,7 +335,7 @@ describe('renderMarkdown', () => {
     // summary
     expect(md).toContain('| Batches stored | 1,200 (3 flagged as overlapping) |');
     expect(md).toContain('| Frames missing (sequence gaps) | 11 of 55 expected (20.000%) |');
-    expect(md).toContain('| Tablet to server delay, p95 | 900 ms (target ≤ 750 ms) |');
+    expect(md).toContain('| Tablet to server delay, p95 | 900 ms (target ≤ 2,000 ms) |');
     expect(md).toContain('| Frame rate | 1.5 frames/s while active |');
     expect(md).toContain('| Parity | 75.000% of 4 non-empty field comparisons (target ≥ 99.9%) |');
 
