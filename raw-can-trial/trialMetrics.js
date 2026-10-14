@@ -7,7 +7,7 @@ const { orderSessions, forEachWindow } = require('./stateAssembler');
 const { LIVE_KEYS } = require('./buildLiveValues');
 const { KNOWN_CAN_IDS } = require('./decoders');
 const {
-  EXCLUDED_FIELDS, summarize, lossBySession, volumeFromCounts, ParityTally,
+  EXCLUDED_FIELDS, summarize, sequenceRuns, mergeRuns, lossFromRuns, volumeFromCounts, ParityTally,
 } = require('./analysis');
 const { activeSegments } = require('./comparison');
 
@@ -84,6 +84,9 @@ const createAccumulator = () => ({
   storedBytes: 0,
   requestBytes: 0,
   loss: [],
+  // Sequence runs per session over all windows; loss is derived from these so a
+  // gap crossing a window boundary is still counted.
+  seqRuns: new Map(),
   frameLag: [],
   batchTransit: [],
   batching: [],
@@ -134,7 +137,12 @@ const collectWindow = async (acc, { vehicle, fromMs, toMs, evccFixed = false, co
     acc.batching.push(b.sent_at_ms - Number(b.frames[0].receivedAtMs));
     for (const f of b.frames) acc.frameLag.push(b.server_ms - Number(f.receivedAtMs));
   }
-  acc.loss.push(...lossBySession(ordered.sessions));
+  // Merged after every window, so memory grows with the number of gaps, not of windows.
+  for (const s of ordered.sessions) {
+    const before = acc.seqRuns.get(s.sessionId) || [];
+    acc.seqRuns.set(s.sessionId, mergeRuns(before.concat(sequenceRuns(s.frames))));
+  }
+  acc.loss = lossFromRuns(acc.seqRuns);
   for (const s of ordered.sessions) {
     acc.activeMs += s.frames[s.frames.length - 1].receivedAtMs - s.frames[0].receivedAtMs;
     for (const f of s.frames) {

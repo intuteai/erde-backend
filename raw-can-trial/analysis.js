@@ -65,6 +65,59 @@ const lossBySession = (sessions) => sessions.map(({ sessionId, frames }) => {
   };
 });
 
+/**
+ * Runs of consecutive sequence numbers, e.g. [1,2,3,7,8] -> [[1,3],[7,8]].
+ * @param {Array<{ sequence: number }>} frames sorted, unique
+ */
+const sequenceRuns = (frames) => {
+  const runs = [];
+  for (const { sequence } of frames) {
+    const last = runs[runs.length - 1];
+    if (last && sequence === last[1] + 1) last[1] = sequence;
+    else runs.push([sequence, sequence]);
+  }
+  return runs;
+};
+
+/**
+ * Sorts runs and joins those that overlap or touch: [[8,10],[1,3],[3,5],[6,6]] -> [[1,6],[8,10]].
+ * @param {Array<[number, number]>} runs
+ */
+const mergeRuns = (runs) => {
+  const merged = [];
+  for (const [a, b] of [...runs].sort((x, y) => x[0] - y[0])) {
+    const last = merged[merged.length - 1];
+    if (last && a <= last[1] + 1) last[1] = Math.max(last[1], b);
+    else merged.push([a, b]);
+  }
+  return merged;
+};
+
+/**
+ * Loss per session from sequence runs collected over several windows, so a gap
+ * that crosses a window boundary, or a batch that arrived in a later window than
+ * its neighbours, is counted correctly. Same result shape as lossBySession.
+ * @param {Map<string, Array<[number, number]>>} runsBySession
+ */
+const lossFromRuns = (runsBySession) => {
+  const out = [];
+  for (const [sessionId, runs] of runsBySession) {
+    if (!runs.length) continue;
+    const merged = mergeRuns(runs);
+    const gaps = [];
+    let received = 0;
+    for (let i = 0; i < merged.length; i++) {
+      received += merged[i][1] - merged[i][0] + 1;
+      if (i > 0) gaps.push([merged[i - 1][1] + 1, merged[i][0] - 1]);
+    }
+    const first = merged[0][0];
+    const last = merged[merged.length - 1][1];
+    const expected = last - first + 1;
+    out.push({ sessionId, firstSequence: first, lastSequence: last, expected, received, missing: expected - received, gaps });
+  }
+  return out;
+};
+
 // ─────────────────────────── volume ───────────────────────────
 
 /** Frame counts and rates per CAN id, over the time the sessions were active. */
@@ -320,6 +373,9 @@ module.exports = {
   percentile,
   summarize,
   lossBySession,
+  sequenceRuns,
+  mergeRuns,
+  lossFromRuns,
   volumeStats,
   volumeFromCounts,
   compareValue,

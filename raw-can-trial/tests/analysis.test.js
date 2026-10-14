@@ -4,6 +4,9 @@ const {
   percentile,
   summarize,
   lossBySession,
+  sequenceRuns,
+  mergeRuns,
+  lossFromRuns,
   volumeStats,
   compareValue,
   ParityTally,
@@ -413,5 +416,37 @@ describe('ParityTally.addRowCandidates', () => {
     const f = t.results().fields.find((x) => x.field === 'soc_percent');
     expect(f.bothNull).toBe(1);
     expect(f.mismatches).toBe(0);
+  });
+});
+
+describe('sequenceRuns', () => {
+  test('splits sorted sequences into runs of consecutive numbers', () => {
+    expect(sequenceRuns(seqFrames([1, 2, 3, 7, 8, 10]))).toEqual([[1, 3], [7, 8], [10, 10]]);
+    expect(sequenceRuns([])).toEqual([]);
+  });
+});
+
+describe('mergeRuns', () => {
+  test('sorts and joins overlapping or touching runs, leaving the input alone', () => {
+    const runs = [[8, 10], [1, 3], [3, 5], [6, 6]];
+    expect(mergeRuns(runs)).toEqual([[1, 6], [8, 10]]);
+    expect(runs).toEqual([[8, 10], [1, 3], [3, 5], [6, 6]]);
+    expect(mergeRuns([])).toEqual([]);
+  });
+});
+
+describe('lossFromRuns', () => {
+  test('merges runs from several windows, including overlaps and out-of-order runs', () => {
+    const runs = new Map([['a', [[8, 10], [1, 3], [3, 5], [6, 6]]], ['b', [[5, 5]]]]);
+    const [a, b] = lossFromRuns(runs);
+    expect(a).toEqual({ sessionId: 'a', firstSequence: 1, lastSequence: 10, expected: 10, received: 9, missing: 1, gaps: [[7, 7]] });
+    expect(b).toEqual({ sessionId: 'b', firstSequence: 5, lastSequence: 5, expected: 1, received: 1, missing: 0, gaps: [] });
+  });
+
+  test('agrees with lossBySession on a single window', () => {
+    const frames = seqFrames([10, 12, 13, 20, 21]);
+    const [fromRuns] = lossFromRuns(new Map([['c', sequenceRuns(frames)]]));
+    const [direct] = lossBySession([{ sessionId: 'c', frames }]);
+    expect(fromRuns).toEqual(direct);
   });
 });
