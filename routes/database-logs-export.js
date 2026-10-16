@@ -7,26 +7,10 @@ const checkPermission   = require('../middleware/checkPermission');
 const { generalLimiter } = require('../middleware/rateLimiter');
 const logger = require('../utils/logger');
 
+// Backpressure-safe gzip helpers that also abort when the client disconnects
+const { gzipWrite, gzipEnd, rollbackAndRelease } = require('../utils/streamExport');
+
 const router = express.Router();
-
-// Backpressure-safe gzip helpers — pause the cursor loop when the
-// client is slow so Node's write buffer never grows unbounded.
-function gzipWrite(gz, data) {
-  return new Promise((resolve, reject) => {
-    const ok = gz.write(data);
-    if (ok) return resolve();
-    gz.once('drain', resolve);
-    gz.once('error', reject);
-  });
-}
-
-function gzipEnd(gz) {
-  return new Promise((resolve, reject) => {
-    gz.once('finish', resolve);
-    gz.once('error', reject);
-    gz.end();
-  });
-}
 
 /* -------------------------------------------------------
    3-tier structure lookup
@@ -255,10 +239,10 @@ router.get(
       logger.info(`Cell voltage export: vehicle ${id}, ${totalRows} rows, ${maxModules}x${maxCells} structure`);
 
       client = await db.getClient();
-      await client.query("SET statement_timeout = '180s'");
-
       const cursorName = `cells_cursor_${Date.now()}`;
       await client.query('BEGIN');
+      // SET LOCAL: timeout ends with this transaction instead of leaking onto the pooled connection
+      await client.query("SET LOCAL statement_timeout = '180s'");
       await client.query(
         `DECLARE ${cursorName} CURSOR FOR
          SELECT recorded_at, cell_modules FROM live_values
@@ -281,7 +265,7 @@ router.get(
       for (let m = 1; m <= maxModules; m++) {
         for (let c = 1; c <= maxCells; c++) headers.push(`M${m}_C${c}`);
       }
-      await gzipWrite(gz, '﻿' + headers.join(',') + '\n');
+      await gzipWrite(gz, '﻿' + headers.join(',') + '\n', res);
 
       const CHUNK_SIZE = 1000;
       let rowCount = 0;
@@ -304,7 +288,7 @@ router.get(
           return row.join(',');
         }).join('\n') + '\n';
 
-        await gzipWrite(gz, csvChunk);
+        await gzipWrite(gz, csvChunk, res);
         rowCount += rows.length;
 
         if (chunkCount % 10 === 0) {
@@ -315,17 +299,20 @@ router.get(
       await client.query(`CLOSE ${cursorName}`);
       await client.query('COMMIT');
       logger.info(`Cell voltage export complete: ${rowCount} rows for vehicle ${id}`);
-      await gzipEnd(gz);
+      await gzipEnd(gz, res);
 
     } catch (err) {
-      logger.error(`Cell export failed (vehicle ${id}): ${err.message}`);
-      if (client) {
-        try { await client.query('ROLLBACK'); } catch (e) { logger.error(`Rollback error: ${e.message}`); }
+      if (err.code === 'CLIENT_DISCONNECTED') {
+        logger.warn(`Cell export aborted by client (vehicle ${id}) – rolling back cursor`);
+      } else {
+        logger.error(`Cell export failed (vehicle ${id}): ${err.message}`);
       }
+      if (gz) gz.destroy();
+      await rollbackAndRelease(client, logger, `Cell export (vehicle ${id})`);
+      client = null;
       if (!res.headersSent) {
         return res.status(500).json({ error: 'Export failed' });
       }
-      if (gz) gz.destroy();
     } finally {
       if (client) client.release();
     }
@@ -395,10 +382,10 @@ router.get(
       logger.info(`Temperature export: vehicle ${id}, ${totalRows} rows, ${maxModules}x${maxSensors} structure`);
 
       client = await db.getClient();
-      await client.query("SET statement_timeout = '180s'");
-
       const cursorName = `temps_cursor_${Date.now()}`;
       await client.query('BEGIN');
+      // SET LOCAL: timeout ends with this transaction instead of leaking onto the pooled connection
+      await client.query("SET LOCAL statement_timeout = '180s'");
       await client.query(
         `DECLARE ${cursorName} CURSOR FOR
          SELECT recorded_at, temp_modules FROM live_values
@@ -421,7 +408,7 @@ router.get(
       for (let m = 1; m <= maxModules; m++) {
         for (let t = 1; t <= maxSensors; t++) headers.push(`M${m}_T${t}`);
       }
-      await gzipWrite(gz, '﻿' + headers.join(',') + '\n');
+      await gzipWrite(gz, '﻿' + headers.join(',') + '\n', res);
 
       const CHUNK_SIZE = 1000;
       let rowCount = 0;
@@ -444,7 +431,7 @@ router.get(
           return row.join(',');
         }).join('\n') + '\n';
 
-        await gzipWrite(gz, csvChunk);
+        await gzipWrite(gz, csvChunk, res);
         rowCount += rows.length;
 
         if (chunkCount % 10 === 0) {
@@ -455,17 +442,20 @@ router.get(
       await client.query(`CLOSE ${cursorName}`);
       await client.query('COMMIT');
       logger.info(`Temperature export complete: ${rowCount} rows for vehicle ${id}`);
-      await gzipEnd(gz);
+      await gzipEnd(gz, res);
 
     } catch (err) {
-      logger.error(`Temp export failed (vehicle ${id}): ${err.message}`);
-      if (client) {
-        try { await client.query('ROLLBACK'); } catch (e) { logger.error(`Rollback error: ${e.message}`); }
+      if (err.code === 'CLIENT_DISCONNECTED') {
+        logger.warn(`Temp export aborted by client (vehicle ${id}) – rolling back cursor`);
+      } else {
+        logger.error(`Temp export failed (vehicle ${id}): ${err.message}`);
       }
+      if (gz) gz.destroy();
+      await rollbackAndRelease(client, logger, `Temp export (vehicle ${id})`);
+      client = null;
       if (!res.headersSent) {
         return res.status(500).json({ error: 'Export failed' });
       }
-      if (gz) gz.destroy();
     } finally {
       if (client) client.release();
     }

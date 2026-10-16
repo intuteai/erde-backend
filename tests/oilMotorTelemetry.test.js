@@ -153,6 +153,139 @@ describe('ingest of oil motor fields', () => {
   });
 });
 
+describe('4th-machine oil motor parameters (torque, AC current, MCU temp, radiator temp)', () => {
+  const NEW = ['oil_motor_torque_nm', 'oil_motor_ac_current_a', 'oil_motor_mcu_temp_c', 'oil_motor_radiator_temp_c'];
+  const idx = (k) => LIVE_VALUES_COLUMNS.indexOf(k);
+
+  it('registers all four columns', () => {
+    for (const k of NEW) expect(idx(k)).toBeGreaterThan(-1);
+    expect(LIVE_VALUES_COLUMNS.slice(-2)).toEqual(['cell_modules', 'temp_modules']);
+  });
+
+  it('stores the spec example payload as-is', async () => {
+    const { params } = await ingest({
+      oil_motor_torque_nm: 192, oil_motor_ac_current_a: 48.6, oil_motor_speed_rpm: 1475,
+      oil_motor_temp_c: 46, oil_motor_mcu_temp_c: 44, oil_motor_radiator_temp_c: 39,
+    });
+    expect([
+      params[idx('oil_motor_torque_nm')], params[idx('oil_motor_ac_current_a')], params[SPEED_IDX],
+      params[TEMP_IDX], params[idx('oil_motor_mcu_temp_c')], params[idx('oil_motor_radiator_temp_c')],
+    ]).toEqual([192, 48.6, 1475, 46, 44, 39]);
+  });
+
+  it('keeps zero as zero (zero is a valid reading) and null as null', async () => {
+    const { params } = await ingest({
+      oil_motor_torque_nm: 0, oil_motor_ac_current_a: 0, oil_motor_mcu_temp_c: null, oil_motor_radiator_temp_c: 0,
+    });
+    expect(params[idx('oil_motor_torque_nm')]).toBe(0);
+    expect(params[idx('oil_motor_ac_current_a')]).toBe(0);
+    expect(params[idx('oil_motor_mcu_temp_c')]).toBeNull();
+    expect(params[idx('oil_motor_radiator_temp_c')]).toBe(0);
+  });
+
+  it('per-frame staleness: 0x0109A6A7 stale nulls current/temp/MCU temp but keeps torque/speed/radiator', async () => {
+    const { params } = await ingest({
+      oil_motor_torque_nm: -12.5, oil_motor_speed_rpm: 900, oil_motor_radiator_temp_c: 41,
+      oil_motor_ac_current_a: null, oil_motor_temp_c: null, oil_motor_mcu_temp_c: null,
+    });
+    expect(params[idx('oil_motor_torque_nm')]).toBe(-12.5);
+    expect(params[SPEED_IDX]).toBe(900);
+    expect(params[idx('oil_motor_radiator_temp_c')]).toBe(41);
+    expect(params[idx('oil_motor_ac_current_a')]).toBeNull();
+    expect(params[TEMP_IDX]).toBeNull();
+    expect(params[idx('oil_motor_mcu_temp_c')]).toBeNull();
+  });
+
+  it('stores NULL for all four when an older HMI omits them', async () => {
+    const { res, params } = await ingest({ oil_motor_speed_rpm: 1480, oil_motor_temp_c: 47 });
+    expect(res.inserted).toBe(1);
+    for (const k of NEW) expect(params[idx(k)]).toBeNull();
+  });
+
+  it('nulls values that would overflow their column instead of dropping the row', async () => {
+    const { res, params } = await ingest({
+      oil_motor_torque_nm: 100000, oil_motor_ac_current_a: 10000, oil_motor_mcu_temp_c: 1000,
+      oil_motor_radiator_temp_c: -1000, soc_percent: 66,
+    });
+    expect(res.inserted).toBe(1);
+    for (const k of NEW) expect(params[idx(k)]).toBeNull();
+    expect(params[idx('soc_percent')]).toBe(66);
+  });
+
+  it('formatLiveData exposes all four (numeric strings from pg → numbers)', () => {
+    const out = formatLiveData({
+      recorded_at: new Date(), oil_motor_torque_nm: '192.00', oil_motor_ac_current_a: '48.600',
+      oil_motor_mcu_temp_c: '44.00', oil_motor_radiator_temp_c: null,
+    });
+    expect(out.oil_motor_torque_nm).toBe(192);
+    expect(out.oil_motor_ac_current_a).toBe(48.6);
+    expect(out.oil_motor_mcu_temp_c).toBe(44);
+    expect(out.oil_motor_radiator_temp_c).toBeNull();
+  });
+});
+
+describe('batch atomicity: one bad item must not lose the batch', () => {
+  const sqls = () => client.query.mock.calls.map(([s]) => (typeof s === 'string' ? s.trim().split(/\s+/).slice(0, 3).join(' ') : s));
+
+  it('rolls back only the failing item (savepoint) and commits the rest', async () => {
+    let n = 0;
+    client.query.mockImplementation(async (sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO live_values') && ++n === 2) {
+        const e = new Error('insert or update on table "live_values" violates foreign key constraint');
+        e.code = '23503';
+        throw e;
+      }
+      return { rows: [], command: typeof sql === 'string' ? sql.trim().split(/\s+/)[0].toUpperCase() : undefined };
+    });
+    const now = Date.now();
+    const res = await insertTelemetryItems([
+      { ts: now,     vehicleIdOrMasterId: 5,   live: { oil_motor_speed_rpm: 1 } },
+      { ts: now + 1, vehicleIdOrMasterId: 999, live: { oil_motor_speed_rpm: 2 } }, // fails
+      { ts: now + 2, vehicleIdOrMasterId: 6,   live: { oil_motor_speed_rpm: 3 } },
+    ]);
+    expect(res.inserted).toBe(2);
+    const s = sqls();
+    expect(s.filter((x) => x === 'SAVEPOINT telemetry_item')).toHaveLength(3);
+    expect(s).toContain('ROLLBACK TO SAVEPOINT');
+    expect(s[s.length - 1]).toBe('COMMIT');
+    expect(s).not.toContain('ROLLBACK'); // the transaction itself is never rolled back
+  });
+
+  it('fails loudly (so the HMI retries) if COMMIT is reported as ROLLBACK', async () => {
+    client.query.mockImplementation(async (sql) =>
+      sql === 'COMMIT' ? { rows: [], command: 'ROLLBACK' } : { rows: [] });
+    await expect(insertTelemetryItems([{ ts: Date.now(), vehicleIdOrMasterId: 5, live: {} }]))
+      .rejects.toThrow(/not committed/);
+    expect(client.release).toHaveBeenCalled();
+  });
+
+  it('a broken connection (savepoint rollback fails) aborts the batch with an error, never a fake success', async () => {
+    client.query.mockImplementation(async (sql) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO live_values')) throw new Error('Connection terminated');
+      if (sql === 'ROLLBACK TO SAVEPOINT telemetry_item') throw new Error('Client has encountered a connection error');
+      return { rows: [] };
+    });
+    await expect(insertTelemetryItems([{ ts: Date.now(), vehicleIdOrMasterId: 5, live: {} }])).rejects.toThrow();
+    expect(client.release).toHaveBeenCalled();
+  });
+});
+
+describe('strict "no reading" handling for oil fields', () => {
+  it('treats "", whitespace, booleans, arrays and objects as NULL but keeps 0 / "0"', async () => {
+    for (const blank of ['', '   ', true, false, [], {}]) {
+      client.query.mockClear();
+      const { params } = await ingest({ oil_motor_speed_rpm: blank, oil_motor_temp_c: blank, oil_motor_torque_nm: blank });
+      expect(params[SPEED_IDX]).toBeNull();
+      expect(params[TEMP_IDX]).toBeNull();
+      expect(params[LIVE_VALUES_COLUMNS.indexOf('oil_motor_torque_nm')]).toBeNull();
+    }
+    client.query.mockClear();
+    const { params } = await ingest({ oil_motor_speed_rpm: '0', oil_motor_temp_c: 0 });
+    expect(params[SPEED_IDX]).toBe(0);
+    expect(params[TEMP_IDX]).toBe(0);
+  });
+});
+
 describe('helpers', () => {
   it('toInt', () => {
     expect(toInt(0)).toBe(0);

@@ -35,8 +35,20 @@ const toText = (v) => (v === null || v === undefined ? null : String(v));
 // For INTEGER columns: rounds fractional input and nulls anything that can't fit,
 // so one odd sensor value never fails the INSERT and drops the whole telemetry row.
 const INT4_MAX = 2147483647;
+
+// Stricter than toNum for new fields: "", whitespace, booleans, arrays and objects are
+// "no reading" (NULL), never 0 — zero is a valid reading and must stay distinguishable.
+const toStrictNum = (v) => {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+};
+
 const toInt = (v) => {
-  const n = toNum(v);
+  const n = toStrictNum(v);
   if (n === null || !Number.isFinite(n)) return null;
   const r = Math.round(n);
   return Math.abs(r) > INT4_MAX ? null : r;
@@ -44,7 +56,7 @@ const toInt = (v) => {
 
 // For NUMERIC(p,s) columns: nulls values that would overflow (e.g. numeric(5,2) → |v| < 999.995).
 const toBoundedNum = (v, maxAbsExclusive) => {
-  const n = toNum(v);
+  const n = toStrictNum(v);
   if (n === null || !Number.isFinite(n)) return null;
   return Math.abs(n) >= maxAbsExclusive ? null : n;
 };
@@ -218,9 +230,13 @@ const LIVE_VALUES_COLUMNS = [
   // OIL MOTOR (MCU2)
   "oil_motor_speed_rpm",            // $113
   "oil_motor_temp_c",               // $114
+  "oil_motor_torque_nm",            // $115
+  "oil_motor_ac_current_a",         // $116
+  "oil_motor_mcu_temp_c",           // $117
+  "oil_motor_radiator_temp_c",      // $118
   // MUST BE LAST — jsonb columns
-  "cell_modules",                   // $115
-  "temp_modules",                   // $116
+  "cell_modules",                   // $119
+  "temp_modules",                   // $120
 ];
 
 /* =========================
@@ -422,9 +438,13 @@ const insertTelemetryItems = async (items = []) => {
         // OIL MOTOR (MCU2) — null when stale, absent on older HMI builds
         toInt(live.oil_motor_speed_rpm),              // $113  integer
         toBoundedNum(live.oil_motor_temp_c, 999.995), // $114  numeric(5,2)
+        toBoundedNum(live.oil_motor_torque_nm, 99999.995),        // $115  numeric(7,2)
+        toBoundedNum(live.oil_motor_ac_current_a, 9999.9995),     // $116  numeric(7,3)
+        toBoundedNum(live.oil_motor_mcu_temp_c, 999.995),         // $117  numeric(5,2)
+        toBoundedNum(live.oil_motor_radiator_temp_c, 999.995),    // $118  numeric(5,2)
         // MUST BE LAST — jsonb columns
-        toJsonb(live.cell_modules),                   // $115
-        toJsonb(live.temp_modules),                   // $116
+        toJsonb(live.cell_modules),                   // $119
+        toJsonb(live.temp_modules),                   // $120
       ];
 
       // Safety assert — if LIVE_VALUES_COLUMNS, values[], and SQL ever drift
@@ -436,6 +456,10 @@ const insertTelemetryItems = async (items = []) => {
       }
 
       try {
+        // Per-item savepoint: without it, one failing INSERT (FK, trigger, overflow…) aborts
+        // the whole transaction, every later item fails with 25P02 and COMMIT silently
+        // becomes ROLLBACK — losing the entire batch while still reporting success.
+        await client.query("SAVEPOINT telemetry_item");
         await client.query(
           `
           INSERT INTO live_values (
@@ -485,6 +509,8 @@ const insertTelemetryItems = async (items = []) => {
             evcc1_evse_evcc_chg_finished, evcc1_ac_max_current_value_a,
             hydraulic_oil_temp_c,
             oil_motor_speed_rpm, oil_motor_temp_c,
+            oil_motor_torque_nm, oil_motor_ac_current_a,
+            oil_motor_mcu_temp_c, oil_motor_radiator_temp_c,
             cell_modules, temp_modules
           )
           VALUES (
@@ -505,7 +531,8 @@ const insertTelemetryItems = async (items = []) => {
             $107,$108,$109,$110,$111,
             $112,
             $113,$114,
-            $115::jsonb,$116::jsonb
+            $115,$116,$117,$118,
+            $119::jsonb,$120::jsonb
           )
           `,
           values
@@ -545,6 +572,10 @@ const insertTelemetryItems = async (items = []) => {
           });
         }
       } catch (itemErr) {
+        // Undo only this item so the transaction stays usable for the rest of the batch.
+        // If even that fails the connection is broken: rethrow → outer ROLLBACK → 500 → HMI retries.
+        await client.query("ROLLBACK TO SAVEPOINT telemetry_item");
+
         // Decode which column caused the error from the $N in the error message
         const match = itemErr.where?.match(/\$(\d+)/);
         let overflow = null;
@@ -571,7 +602,12 @@ const insertTelemetryItems = async (items = []) => {
       }
     }
 
-    await client.query("COMMIT");
+    // pg does not throw when COMMIT ends an aborted transaction — it reports "ROLLBACK".
+    // Treat that as a failure so the client retries instead of believing data was saved.
+    const commitRes = await client.query("COMMIT");
+    if (commitRes?.command && commitRes.command !== "COMMIT") {
+      throw new Error(`Telemetry batch was not committed (database returned ${commitRes.command})`);
+    }
 
     // Invalidate live cache for every vehicle written in this batch so the
     // next SSE poll immediately fetches fresh data rather than waiting for TTL.

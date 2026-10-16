@@ -79,11 +79,15 @@ router.post(
       });
     }
 
+    // A transaction must run on ONE connection: db.query() may pick a different pooled
+    // connection per call, leaving BEGIN stranded "idle in transaction" in the pool.
+    let client;
     try {
-      await db.query('BEGIN');
+      client = await db.getClient();
+      await client.query('BEGIN');
 
       /* Get customer role */
-      const roleRes = await db.query(
+      const roleRes = await client.query(
         `SELECT role_id FROM roles WHERE role_name = 'customer'`
       );
 
@@ -92,7 +96,7 @@ router.post(
       }
 
       /* Create user with DEFAULT password */
-      const userRes = await db.query(
+      const userRes = await client.query(
         `
         INSERT INTO users (role_id, name, email, password_hash, created_at)
         VALUES ($1, $2, $3, $4, NOW())
@@ -107,7 +111,7 @@ router.post(
       );
 
       /* Create customer record */
-      const custRes = await db.query(
+      const custRes = await client.query(
         `
         INSERT INTO customer_master (
           user_id,
@@ -131,7 +135,7 @@ router.post(
         ]
       );
 
-      await db.query('COMMIT');
+      await client.query('COMMIT');
 
       logger.info(
         `Customer created: ${company_name} | login=${email} | default password assigned`
@@ -142,7 +146,9 @@ router.post(
         message: 'Customer & login created with default password',
       });
     } catch (err) {
-      await db.query('ROLLBACK');
+      if (client) {
+        try { await client.query('ROLLBACK'); } catch (_) { client.release(true); client = null; /* unknown state — discard */ }
+      }
 
       logger.error(`POST /customers error: ${err.message}`);
 
@@ -151,6 +157,8 @@ router.post(
           ? 'Email already exists'
           : 'Server error',
       });
+    } finally {
+      if (client) client.release();
     }
   }
 );
@@ -250,33 +258,38 @@ router.delete(
   async (req, res) => {
     const { id } = req.params;
 
+    // One dedicated connection for the whole transaction (see POST above).
+    let client;
     try {
-      await db.query('BEGIN');
+      client = await db.getClient();
+      await client.query('BEGIN');
 
-      const custRes = await db.query(
+      const custRes = await client.query(
         `SELECT user_id FROM customer_master WHERE customer_id = $1`,
         [id]
       );
 
       if (!custRes.rows.length) {
-        await db.query('ROLLBACK');
+        await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Customer not found' });
       }
 
       const userId = custRes.rows[0].user_id;
 
-      await db.query(`DELETE FROM customer_master WHERE customer_id = $1`, [id]);
+      await client.query(`DELETE FROM customer_master WHERE customer_id = $1`, [id]);
 
       if (userId) {
-        await db.query(`DELETE FROM users WHERE user_id = $1`, [userId]);
+        await client.query(`DELETE FROM users WHERE user_id = $1`, [userId]);
       }
 
-      await db.query('COMMIT');
+      await client.query('COMMIT');
 
       logger.info(`Customer deleted: ${id}`);
       res.json({ success: true, message: 'Customer & user deleted' });
     } catch (err) {
-      await db.query('ROLLBACK');
+      if (client) {
+        try { await client.query('ROLLBACK'); } catch (_) { client.release(true); client = null; /* unknown state — discard */ }
+      }
 
       logger.error(`DELETE /customers/${id} error: ${err.message}`);
 
@@ -285,6 +298,8 @@ router.delete(
           ? 'Cannot delete: Customer has vehicles assigned'
           : 'Delete failed',
       });
+    } finally {
+      if (client) client.release();
     }
   }
 );

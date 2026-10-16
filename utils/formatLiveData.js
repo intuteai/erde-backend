@@ -319,6 +319,10 @@ function formatLiveData(row) {
     // Oil Motor (MCU2)
     oil_motor_speed_rpm:  toNumber(r.oil_motor_speed_rpm),
     oil_motor_temp_c:     toNumber(r.oil_motor_temp_c),
+    oil_motor_torque_nm:       toNumber(r.oil_motor_torque_nm),
+    oil_motor_ac_current_a:    toNumber(r.oil_motor_ac_current_a),
+    oil_motor_mcu_temp_c:      toNumber(r.oil_motor_mcu_temp_c),
+    oil_motor_radiator_temp_c: toNumber(r.oil_motor_radiator_temp_c),
 
     // EVCC1 — EV Charging Controller
     evcc1_pwr_stat:               toNumber(r.evcc1_pwr_stat),

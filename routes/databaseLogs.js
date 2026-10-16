@@ -7,25 +7,8 @@ const authenticateToken = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
 const { generalLimiter } = require('../middleware/rateLimiter');
 const logger = require('../utils/logger');
-
-// Backpressure-safe gzip write — pauses the cursor loop when the
-// client is slow so Node's write buffer never grows unbounded.
-function gzipWrite(gz, data) {
-  return new Promise((resolve, reject) => {
-    const ok = gz.write(data);
-    if (ok) return resolve();
-    gz.once('drain', resolve);
-    gz.once('error', reject);
-  });
-}
-
-function gzipEnd(gz) {
-  return new Promise((resolve, reject) => {
-    gz.once('finish', resolve);
-    gz.once('error', reject);
-    gz.end();
-  });
-}
+// Backpressure-safe gzip helpers that also abort when the client disconnects
+const { gzipWrite, gzipEnd, rollbackAndRelease } = require('../utils/streamExport');
 
 const router = express.Router();
 
@@ -176,6 +159,10 @@ const ALL_COLUMN_DEFS = [
   // Oil Motor (MCU2)
   { key: 'oil_motor_speed_rpm',            label: 'Oil Motor Speed (RPM)' },
   { key: 'oil_motor_temp_c',               label: 'Oil Motor Temperature (°C)' },
+  { key: 'oil_motor_torque_nm',            label: 'Oil Motor Torque (N·m)' },
+  { key: 'oil_motor_ac_current_a',         label: 'Oil Motor Current (A)' },
+  { key: 'oil_motor_mcu_temp_c',           label: 'Oil Motor MCU Temperature (°C)' },
+  { key: 'oil_motor_radiator_temp_c',      label: 'Oil Motor Radiator Temperature (°C)' },
   // BTMS
   { key: 'btms_command_mode',              label: 'BTMS Command Mode' },
   { key: 'btms_status_mode',               label: 'BTMS Status Mode' },
@@ -451,7 +438,10 @@ router.get(
     let gz;
     try {
       client = await db.getClient();
-      await client.query("SET statement_timeout = '180s'");
+      // One read-only transaction for the whole export; SET LOCAL keeps the 180s timeout
+      // scoped to it instead of leaking onto the pooled connection afterwards.
+      await client.query('BEGIN');
+      await client.query("SET LOCAL statement_timeout = '180s'");
 
       const regularKeys = columnKeys.filter(k => k !== 'recorded_at' && k !== 'output_power_kw');
       const hasComputed = columnKeys.includes('output_power_kw');
@@ -484,7 +474,7 @@ router.get(
       const activeColumnLabels = activeColumnKeys.map(k => ALL_COLUMN_MAP[k]?.label ?? k);
 
       if (activeColumnKeys.length === 0) {
-        client.release();
+        await rollbackAndRelease(client, logger, `Export (vehicle ${vehicleId})`);
         client = null;
         return res.status(400).json({ error: 'No data available in selected columns' });
       }
@@ -519,14 +509,13 @@ router.get(
       gz.pipe(res);
 
       const csvHeader = activeColumnLabels.map(l => `"${l}"`).join(',') + '\n';
-      await gzipWrite(gz, csvHeader);
+      await gzipWrite(gz, csvHeader, res);
 
       const CHUNK_SIZE = 5000;
       const cursorName = `export_cursor_${Date.now()}_${vehicleId}`;
       let rowCount = 0;
       let chunkCount = 0;
 
-      await client.query('BEGIN');
       await client.query(`DECLARE ${cursorName} CURSOR FOR ${exportSQL}`, params);
 
       while (true) {
@@ -546,7 +535,7 @@ router.get(
           }).join(',')
         ).join('\n') + '\n';
 
-        await gzipWrite(gz, csvChunk);
+        await gzipWrite(gz, csvChunk, res);
 
         if (chunkCount % 10 === 0) {
           logger.info(`Export progress – vehicle ${vehicleId}: ${rowCount}/${totalRows} rows (${((rowCount / totalRows) * 100).toFixed(1)}%)`);
@@ -557,17 +546,20 @@ router.get(
       await client.query('COMMIT');
 
       logger.info(`Export complete – vehicle ${vehicleId}: ${rowCount} rows, ${activeColumnKeys.length} columns`);
-      await gzipEnd(gz);
+      await gzipEnd(gz, res);
 
     } catch (err) {
-      logger.error(`Export error (vehicle ${vehicleId}): ${err.message}`);
-      if (client) {
-        try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+      if (err.code === 'CLIENT_DISCONNECTED') {
+        logger.warn(`Export aborted by client (vehicle ${vehicleId}) – rolling back cursor`);
+      } else {
+        logger.error(`Export error (vehicle ${vehicleId}): ${err.message}`);
       }
+      if (gz) gz.destroy();
+      await rollbackAndRelease(client, logger, `Export (vehicle ${vehicleId})`);
+      client = null;
       if (!res.headersSent) {
         return res.status(500).json({ error: 'Export failed' });
       }
-      if (gz) gz.destroy();
     } finally {
       if (client) client.release();
     }
