@@ -204,7 +204,16 @@ router.get(
 
         for (const row of rows) {
           const lastSeenIso = row.last_seen ? new Date(row.last_seen).toISOString() : null;
-          const fingerprint = `${lastSeenIso}|${row.total_hours}|${row.total_kwh}|${row.avg_kwh}`;
+          // Status is a function of wall-clock time, not just last_seen — a
+          // vehicle that goes quiet has an unchanging last_seen/total_hours/
+          // total_kwh, but getVehicleStatus(last_seen) still transitions
+          // online -> idle -> offline as time passes. It must be part of the
+          // fingerprint (and computed once, here, before the dedup check),
+          // or that transition is computed correctly on every poll but never
+          // reaches the client — confirmed live: a vehicle stopped and the
+          // dashboard kept showing it online indefinitely.
+          const status = getVehicleStatus(row.last_seen);
+          const fingerprint = `${lastSeenIso}|${row.total_hours}|${row.total_kwh}|${row.avg_kwh}|${status}`;
 
           if (lastSent.get(row.vehicle_master_id) === fingerprint) continue;
           lastSent.set(row.vehicle_master_id, fingerprint);
@@ -218,7 +227,7 @@ router.get(
             total_hours:  row.total_hours,
             total_kwh:    row.total_kwh,
             avg_kwh:      row.avg_kwh,
-            status:       getVehicleStatus(row.last_seen),
+            status,
             last_seen:    row.last_seen,
           };
 
@@ -436,7 +445,11 @@ router.get(
 
         for (const row of rows) {
           const lastSeenIso = row.last_seen ? new Date(row.last_seen).toISOString() : null;
-          const fingerprint = `${lastSeenIso}|${row.total_hours}|${row.total_kwh}|${row.avg_kwh}`;
+          // See the identical comment in /admin-summary/stream above — status
+          // must be in the fingerprint or an online -> offline transition
+          // with no new telemetry never reaches the client.
+          const status = getVehicleStatus(row.last_seen);
+          const fingerprint = `${lastSeenIso}|${row.total_hours}|${row.total_kwh}|${row.avg_kwh}|${status}`;
 
           if (lastSent.get(row.vehicle_master_id) === fingerprint) continue;
           lastSent.set(row.vehicle_master_id, fingerprint);
@@ -453,7 +466,7 @@ router.get(
             total_hours:        row.total_hours,
             total_kwh:          row.total_kwh,
             avg_kwh:            row.avg_kwh,
-            status:             getVehicleStatus(row.last_seen),
+            status,
             last_seen:          row.last_seen,
           };
 
