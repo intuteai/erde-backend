@@ -6,6 +6,29 @@ const logger = require('../utils/logger');
 
 const router = express.Router();
 
+/**
+ * Same ownership-check pattern as routes/vehicle.js's checkVehicleAccess —
+ * admins always pass, customers are restricted to vehicles under their
+ * own user_id. Without this, any authenticated user with 'faults' read
+ * permission (which customers legitimately have, for their own vehicles)
+ * could view any OTHER customer's fault/DTC history just by changing :id.
+ */
+const checkVehicleAccess = async (vehicleId, userId, isCustomer) => {
+  const result = await db.query(
+    `
+    SELECT EXISTS(
+      SELECT 1
+      FROM vehicle_master vm
+      JOIN customer_master cm ON vm.customer_id = cm.customer_id
+      WHERE vm.vehicle_master_id = $1
+        AND ($2::int IS NULL OR cm.user_id = $2)
+    ) AS allowed
+    `,
+    [vehicleId, isCustomer ? userId : null]
+  );
+  return result.rows[0]?.allowed === true;
+};
+
 /* ========================= READ DTC EVENTS (HISTORY) ========================= */
 /**
  * GET /api/faults/:id
@@ -22,10 +45,21 @@ router.get(
   authenticateToken,
   checkPermission('faults', 'read'),
   async (req, res) => {
-    const { id: vehicleId } = req.params;
+    const { id: rawId } = req.params;
     const { days, date } = req.query;
 
+    const vehicleId = parseInt(rawId, 10);
+    if (!Number.isFinite(vehicleId) || vehicleId <= 0) {
+      return res.status(400).json({ error: 'Invalid vehicle ID' });
+    }
+
     try {
+      const isCustomer = req.user.role === 'customer';
+      const allowed = await checkVehicleAccess(vehicleId, req.user.user_id, isCustomer);
+      if (!allowed) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
       let query = `
         SELECT
           dtc_id,

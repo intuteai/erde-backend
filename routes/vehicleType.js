@@ -16,6 +16,13 @@ router.get(
   authenticateToken,
   checkPermission(MODULE, 'read'),
   async (req, res) => {
+    // Defense in depth: no 'customer' row exists for this module in
+    // permissions (admin-only by design), but checkPermission fails OPEN
+    // on a read-permission DB error — this closes that gap explicitly.
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
     try {
       const result = await db.query(`
         SELECT
