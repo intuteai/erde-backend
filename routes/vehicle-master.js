@@ -61,7 +61,8 @@ router.get(
             ELSE NULL
           END                      AS total_hours,
           ROUND(vls.total_kwh_consumed, 2) AS total_kwh,
-          ROUND(vls.avg_kwh, 2)            AS avg_kwh
+          ROUND(vls.avg_kwh, 2)            AS avg_kwh,
+          vls.battery_status
         FROM vehicle_master vm
         JOIN customer_master cm     ON vm.customer_id = cm.customer_id
         JOIN vehicle_type_master vt ON vm.vtype_id    = vt.vtype_id
@@ -80,6 +81,7 @@ router.get(
         total_kwh:    row.total_kwh,
         avg_kwh:      row.avg_kwh,
         status:       getVehicleStatus(row.last_seen),
+        charging_status: row.battery_status || null,
         last_seen:    row.last_seen,
       }));
 
@@ -155,7 +157,8 @@ router.get(
             ELSE NULL
           END                      AS total_hours,
           ROUND(vls.total_kwh_consumed, 2) AS total_kwh,
-          ROUND(vls.avg_kwh, 2)            AS avg_kwh
+          ROUND(vls.avg_kwh, 2)            AS avg_kwh,
+          vls.battery_status
         FROM vehicle_master vm
         JOIN customer_master cm     ON vm.customer_id = cm.customer_id
         JOIN vehicle_type_master vt ON vm.vtype_id    = vt.vtype_id
@@ -213,7 +216,7 @@ router.get(
           // reaches the client — confirmed live: a vehicle stopped and the
           // dashboard kept showing it online indefinitely.
           const status = getVehicleStatus(row.last_seen);
-          const fingerprint = `${lastSeenIso}|${row.total_hours}|${row.total_kwh}|${row.avg_kwh}|${status}`;
+          const fingerprint = `${lastSeenIso}|${row.total_hours}|${row.total_kwh}|${row.avg_kwh}|${status}|${row.battery_status}`;
 
           if (lastSent.get(row.vehicle_master_id) === fingerprint) continue;
           lastSent.set(row.vehicle_master_id, fingerprint);
@@ -228,6 +231,7 @@ router.get(
             total_kwh:    row.total_kwh,
             avg_kwh:      row.avg_kwh,
             status,
+            charging_status: row.battery_status || null,
             last_seen:    row.last_seen,
           };
 
