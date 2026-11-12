@@ -71,8 +71,6 @@ app.use(
   })
 );
 
-require('./raw-can-trial').mount(app); // raw CAN shadow trial; remove with raw-can-trial/
-
 /* =========================
    BODY PARSERS
 ========================= */
