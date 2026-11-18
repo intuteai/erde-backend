@@ -121,4 +121,73 @@ router.get(
   }
 );
 
+/**
+ * GET /api/motor/analytics/:id/hourly?date=YYYY-MM-DD
+ *
+ * Hour-by-hour breakdown for ONE calendar day, queried directly from
+ * live_values (not the daily rollup table — a single day's worth of rows
+ * for one vehicle is small, and idx_live(vehicle_master_id, recorded_at)
+ * covers this filter directly). Lets the UI show a real trend across a
+ * past day instead of a single summary bar.
+ */
+router.get(
+  '/analytics/:id/hourly',
+  authenticateToken,
+  checkPermission('analytics', 'read'),
+  async (req, res) => {
+    const { id } = req.params;
+    const { date } = req.query;
+
+    const vehicleId = parseInt(id, 10);
+    if (!Number.isFinite(vehicleId) || vehicleId <= 0) {
+      return res.status(400).json({ error: 'Invalid vehicle ID' });
+    }
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date param required (YYYY-MM-DD)' });
+    }
+
+    try {
+      const isCustomer = req.user.role === 'customer';
+      const allowed = await checkVehicleAccess(vehicleId, req.user.user_id, isCustomer);
+      if (!allowed) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      const result = await db.query(
+        `
+        SELECT
+          EXTRACT(HOUR FROM recorded_at)::int AS hour,
+
+          MAX(
+            CASE
+              WHEN motor_torque_value IS NOT NULL AND motor_speed_rpm IS NOT NULL
+              THEN (ABS(motor_torque_value) * motor_speed_rpm * 2 * pi()) / (60 * 1000)
+            END
+          )                             AS max_op_power_kw,
+          MAX(ABS(motor_torque_value))   AS max_op_torque_nm,
+          MAX(ABS(motor_ac_current_a))   AS max_op_current_a,
+          MAX(motor_temp_c)              AS max_motor_temp_c,
+          MAX(motor_speed_rpm)           AS max_motor_speed_rpm
+
+        FROM live_values
+        WHERE vehicle_master_id = $1
+          AND recorded_at >= $2::date
+          AND recorded_at <  $2::date + INTERVAL '1 day'
+        GROUP BY EXTRACT(HOUR FROM recorded_at)
+        ORDER BY hour
+        `,
+        [vehicleId, date]
+      );
+
+      res.json(result.rows);
+    } catch (err) {
+      logger.error(`GET /motor/analytics/${id}/hourly failed`, {
+        message: err.message,
+        stack: err.stack,
+      });
+      res.status(500).json({ error: 'Server error' });
+    }
+  }
+);
+
 module.exports = router;
