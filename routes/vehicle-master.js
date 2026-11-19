@@ -11,7 +11,15 @@ const { liveRateLimiter } = require('../middleware/rateLimiter');
 /* =========================
    HELPERS
 ========================= */
-const ONLINE_THRESHOLD_MS = 15 * 1000;   // 15 seconds
+// Measured live over a real 24h window of live_values: normal telemetry
+// cadence is a rock-solid ~2-4s (p99 across every vehicle), but genuine
+// brief hiccups up to ~22s do happen, with the next real outage tier
+// starting around ~205s+ — nothing in between. 15s sat inside that first
+// gap, so a vehicle with nothing actually wrong would flicker
+// online->idle->online on a brief hiccup. 30s clears every observed
+// hiccup with margin while still catching every genuine outage promptly;
+// IDLE_THRESHOLD_MS already sits safely inside the same gap unchanged.
+const ONLINE_THRESHOLD_MS = 30 * 1000;   // 30 seconds
 const IDLE_THRESHOLD_MS   = 60 * 1000;   // 1 minute
 const SUMMARY_POLL_INTERVAL_MS = 2000;   // same cadence as the fleet-location stream
 
